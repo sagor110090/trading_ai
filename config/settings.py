@@ -188,6 +188,8 @@ class Settings:
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     trade_mode: TradeMode = TradeMode.SWING
+    auto_trade: bool = False
+    trade_size: float = 0.01
     symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
     log_level: str = "INFO"
@@ -237,10 +239,15 @@ def load_settings() -> Settings:
     if not symbols:
         symbols = (Symbol.BTCUSD,)
 
+    auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
+    trade_size = float(os.getenv("TRADE_SIZE", "0.01"))
+
     return Settings(
         capital_com=cap_cfg,
         database=db_cfg,
         trade_mode=trade_mode,
+        auto_trade=auto_trade,
+        trade_size=trade_size,
         symbols=symbols,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

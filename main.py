@@ -228,13 +228,46 @@ def run_signal_cycle(client: CapitalComClient) -> None:
                         trade_signal.entry, trade_signal.stop_loss, trade_signal.take_profit,
                         trade_signal.confluence,
                     )
+
+                # Auto-trade: place order on Capital.com if enabled
+                if SETTINGS.auto_trade:
+                    _execute_trade(client, trade_signal)
             else:
                 logger.info("No confluence signal for %s this cycle", symbol.value)
         else:
             logger.warning("Missing H4 or H1 data for confluence check on %s", symbol.value)
 
-        # 4. Auto-train if enough verified signals
+        # 4. Auto-trade if enabled
+        # (handled above inside signal block)
+
+        # 5. Auto-train if enough verified signals
         _try_auto_train(symbol.value)
+
+
+def _execute_trade(client: CapitalComClient, trade_signal: TradeSignal) -> None:
+    """Execute a trade on Capital.com if auto-trade is enabled."""
+    from trading_ai.trade.executor import place_trade
+
+    size = SETTINGS.trade_size
+    logger.warning(
+        "AUTO-TRADE: placing %s %s size=%.4f entry=%.5f SL=%.5f TP=%.5f",
+        trade_signal.signal.value, trade_signal.symbol, size,
+        trade_signal.entry, trade_signal.stop_loss, trade_signal.take_profit,
+    )
+
+    result = place_trade(client, trade_signal, size=size)
+
+    if result.success:
+        logger.info(
+            "Trade executed: %s %s dealRef=%s SL=%.2f TP=%.2f",
+            result.direction, result.epic, result.deal_reference,
+            result.stop_level, result.profit_level,
+        )
+    else:
+        logger.error(
+            "Trade FAILED: %s %s error=%s",
+            result.direction, result.epic, result.error,
+        )
 
 
 def _try_auto_train(symbol: str) -> None:
