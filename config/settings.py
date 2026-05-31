@@ -97,6 +97,8 @@ class ScalpingConfig:
     trend_timeframe: str = "1h"
     entry_timeframe: str = "5m"
     confluence_label: str = "scalping"
+    # Max time a scalping trade stays open (minutes)
+    max_hold_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,8 @@ class DayTradingConfig:
     entry_timeframe: str = "5m"
     big_picture_timeframe: str = "4h"
     confluence_label: str = "day_trading"
+    # Max time a day trade stays open (minutes)
+    max_hold_minutes: int = 120
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,8 @@ class SwingConfig:
     confirmation_timeframe: str = "1h"
     entry_timeframe: str = "5m"
     confluence_label: str = "swing"
+    # Max time a swing trade stays open (minutes)
+    max_hold_minutes: int = 480
 
 
 @dataclass(frozen=True)
@@ -171,7 +177,7 @@ class MLConfig:
 class WalkForwardConfig:
     train_months: int = 6
     test_months: int = 1
-    min_signals: int = 30
+    min_signals: int = 20
 
 
 @dataclass(frozen=True)
@@ -208,6 +214,16 @@ class Settings:
     def get_trade_size(self, symbol: str) -> float:
         """Get position size for a symbol. Falls back to DEFAULT."""
         return self.trade_sizes.get(symbol, self.trade_sizes.get("DEFAULT", 0.01))
+
+    def get_max_hold_minutes(self) -> int:
+        """Get max hold time in minutes for the current trade mode."""
+        if self.trade_mode == TradeMode.SCALPING:
+            return self.scalping.max_hold_minutes
+        elif self.trade_mode == TradeMode.DAY_TRADING:
+            return self.day_trading.max_hold_minutes
+        else:
+            return self.swing.max_hold_minutes
+
     symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
     log_level: str = "INFO"

@@ -3,11 +3,12 @@
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
 
-from trading_ai.config.settings import SETTINGS, SignalType, Symbol
+from trading_ai.config.settings import SETTINGS, SignalType, Symbol, TradeMode
 from trading_ai.data.collector import CapitalComClient, _EPIC_MAP
 from trading_ai.signals.engine import TradeSignal
 
@@ -24,6 +25,19 @@ class OpenPosition:
     level: float
     upl: float
     created_date: str
+
+
+@dataclass(frozen=True)
+class CloseResult:
+    """Result of closing a position."""
+    success: bool
+    deal_id: str
+    epic: str
+    direction: str
+    size: float
+    close_level: Optional[float] = None
+    profit: Optional[float] = None
+    error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -212,3 +226,116 @@ def _confirm_deal(client: CapitalComClient, deal_reference: str, retries: int = 
             logger.warning("Confirm attempt %d failed: %s", attempt + 1, e)
 
     return False
+
+
+def close_position(client: CapitalComClient, position: OpenPosition) -> CloseResult:
+    """Close an open position on Capital.com.
+
+    Args:
+        client: Authenticated Capital.com client.
+        position: The OpenPosition to close.
+
+    Returns:
+        CloseResult with success status and details.
+    """
+    url = f"{client._base_url}/api/v1/positions/{position.deal_id}"
+
+    payload = {"size": position.size}
+
+    try:
+        resp = client._session.delete(url, json=payload, timeout=30)
+        data = resp.json()
+
+        if resp.status_code == 200 and "dealReference" in data:
+            deal_ref = data["dealReference"]
+            logger.info("Position closed: %s %s dealRef=%s", position.direction, position.epic, deal_ref)
+
+            confirmed = _confirm_deal(client, deal_ref)
+
+            return CloseResult(
+                success=confirmed,
+                deal_id=position.deal_id,
+                epic=position.epic,
+                direction=position.direction,
+                size=position.size,
+                close_level=position.level,
+                profit=position.upl,
+                error=None if confirmed else "Deal not confirmed",
+            )
+        else:
+            error_msg = data.get("errorCode", data.get("errorMessage", str(data)))
+            logger.error("Close position rejected: %s", error_msg)
+            return CloseResult(
+                success=False,
+                deal_id=position.deal_id,
+                epic=position.epic,
+                direction=position.direction,
+                size=position.size,
+                error=error_msg,
+            )
+
+    except requests.RequestException as e:
+        logger.error("Close position request failed: %s", e)
+        return CloseResult(
+            success=False,
+            deal_id=position.deal_id,
+            epic=position.epic,
+            direction=position.direction,
+            size=position.size,
+            error=str(e),
+        )
+
+
+def check_timeouts(client: CapitalComClient) -> list[CloseResult]:
+    """Check all open positions and close any that have exceeded their max hold time.
+
+    The max hold time depends on the current trade mode:
+    - Scalping: 30 minutes
+    - Day trading: 2 hours
+    - Swing: 8 hours
+
+    Returns a list of CloseResult for any positions that were closed.
+    """
+    max_hold_minutes = SETTINGS.get_max_hold_minutes()
+    positions = get_open_positions(client)
+
+    if not positions:
+        return []
+
+    results = []
+    now = datetime.now(timezone.utc)
+
+    for pos in positions:
+        # Parse the position's created date
+        try:
+            # Capital.com returns ISO format like "2024-01-15T10:30:00.000"
+            created_str = pos.created_date
+            if not created_str:
+                logger.warning("Position %s has no created date, skipping timeout check", pos.deal_id)
+                continue
+
+            # Parse the timestamp
+            created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+
+            hold_minutes = (now - created).total_seconds() / 60
+
+            if hold_minutes > max_hold_minutes:
+                logger.info(
+                    "TIMEOUT: %s %s held for %.0f min (max %d min) — closing",
+                    pos.direction, pos.epic, hold_minutes, max_hold_minutes,
+                )
+                result = close_position(client, pos)
+                results.append(result)
+            else:
+                logger.debug(
+                    "Position %s %s held %.0f/%d min — OK",
+                    pos.direction, pos.epic, hold_minutes, max_hold_minutes,
+                )
+
+        except Exception as e:
+            logger.warning("Failed to check timeout for position %s: %s", pos.deal_id, e)
+            continue
+
+    return results

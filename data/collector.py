@@ -118,10 +118,19 @@ class CapitalComClient:
         symbol: Symbol,
         timeframe: Timeframe,
         limit: int = 500,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
     ) -> pd.DataFrame:
         """Fetch candle data from Capital.com.
 
         GET /api/v1/prices/{epic}?resolution=MINUTE_5&max=500
+
+        Args:
+            symbol: Trading symbol.
+            timeframe: Candle timeframe.
+            limit: Max candles per request (capped at 1000 by API).
+            from_date: Optional start date (ISO format: "2026-05-24T00:00:00").
+            to_date: Optional end date (same format as from_date).
 
         Returns DataFrame with columns: timestamp, open, high, low, close, volume, spread.
         """
@@ -134,14 +143,18 @@ class CapitalComClient:
         if not resolution:
             raise ValueError(f"No resolution mapping for timeframe {timeframe}")
 
+        # Build URL manually when date params are present — requests.get()
+        # URL-encodes params which breaks the ISO colons in the date format.
         url = f"{self._base_url}/api/v1/prices/{epic}"
-        params = {
-            "resolution": resolution,
-            "max": min(limit, 1000),
-        }
+        query = f"resolution={resolution}&max={min(limit, 1000)}"
+        if from_date:
+            query += f"&from={from_date}"
+        if to_date:
+            query += f"&to={to_date}"
+        full_url = f"{url}?{query}"
 
         try:
-            resp = self._session.get(url, params=params, timeout=30)
+            resp = self._session.get(full_url, timeout=30)
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as e:

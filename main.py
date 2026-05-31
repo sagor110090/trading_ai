@@ -24,6 +24,7 @@ from trading_ai.display import (
     display_no_ml_model,
     display_no_signal,
     display_signal,
+    display_timeout_closed,
     display_trade_blocked,
     display_trade_failed,
     display_trade_placed,
@@ -197,9 +198,14 @@ def run_signal_cycle(client: CapitalComClient) -> None:
             "trade_failed": False,
             "verified": 0,
             "auto_train_started": False,
+            "timeout_closed": False,
         }
 
         fetched: dict[str, pd.DataFrame] = {}
+
+        # ── 0. Check position timeouts ──────────────────────────────────
+        if SETTINGS.auto_trade:
+            _check_timeouts(client, stats)
 
         # ── 1. Fetch and store candles ──────────────────────────────────
         candle_results: dict[str, int] = {}
@@ -279,6 +285,26 @@ def run_signal_cycle(client: CapitalComClient) -> None:
 
         # ── Cycle summary ───────────────────────────────────────────────
         display_cycle_summary(stats)
+
+
+def _check_timeouts(client: CapitalComClient, stats: dict) -> None:
+    """Check open positions and close any that exceeded their max hold time."""
+    from trading_ai.trade.executor import check_timeouts, get_open_positions
+
+    max_minutes = SETTINGS.get_max_hold_minutes()
+    results = check_timeouts(client)
+
+    for result in results:
+        if result.success:
+            stats["timeout_closed"] = True
+            console.print(
+                f"  [yellow]⏰ Closed[/] {result.direction} {result.epic} "
+                f"[dim](held over {max_minutes} min)[/]"
+            )
+        else:
+            console.print(
+                f"  [red]✗ Failed to close[/] {result.epic}: {result.error}"
+            )
 
 
 def _execute_trade(client: CapitalComClient, trade_signal: TradeSignal, stats: dict) -> None:

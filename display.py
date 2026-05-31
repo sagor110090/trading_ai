@@ -176,6 +176,21 @@ def display_auto_train_result(model_type: str, symbol: str, accuracy: float, auc
     console.print(f"  [dim]  {model_type:10s}[/]  acc={accuracy:.1%}  auc={auc_str}")
 
 
+# ── Timeout Check ──────────────────────────────────────────────────────────
+
+
+def display_timeout_closed(position: "OpenPosition", hold_minutes: float, max_minutes: int) -> None:
+    """Show a position that was closed due to timeout."""
+    from trading_ai.trade.executor import OpenPosition as OP  # avoid circular import
+    dir_style = "[bold green]BUY[/]" if position.direction == "BUY" else "[bold red]SELL[/]"
+    content = (
+        f"  ⏰ [yellow]TIMEOUT[/]  {dir_style} [white]{position.epic}[/]\n"
+        f"  [dim]Held[/]  {hold_minutes:.0f} min (max {max_minutes} min)\n"
+        f"  [dim]P&L[/]  {position.upl:+.2f}"
+    )
+    console.print(Panel(content, title="[bold yellow]Position Closed[/]", border_style="yellow", padding=(0, 2)))
+
+
 # ── Cycle Summary ─────────────────────────────────────────────────────────
 
 
@@ -220,6 +235,10 @@ def display_cycle_summary(stats: dict) -> None:
     # Auto-train
     if stats.get("auto_train_started"):
         lines.append("🔄 [cyan]Model retrained[/]")
+
+    # Timeout
+    if stats.get("timeout_closed"):
+        lines.append("⏰ [yellow]Position closed (timeout)[/]")
 
     content = "\n".join(lines)
     console.print()
