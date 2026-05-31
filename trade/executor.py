@@ -286,6 +286,187 @@ def close_position(client: CapitalComClient, position: OpenPosition) -> CloseRes
         )
 
 
+@dataclass(frozen=True)
+class UpdateResult:
+    """Result of updating a position's SL/TP."""
+    success: bool
+    deal_id: str
+    epic: str
+    direction: str
+    old_sl: Optional[float] = None
+    new_sl: Optional[float] = None
+    old_tp: Optional[float] = None
+    new_tp: Optional[float] = None
+    error: Optional[str] = None
+
+
+def update_position_sl_tp(
+    client: CapitalComClient,
+    position: OpenPosition,
+    new_sl: Optional[float] = None,
+    new_tp: Optional[float] = None,
+) -> UpdateResult:
+    """Update the stop loss and/or take profit of an open position.
+
+    IMPORTANT: SL can only be moved in the protective direction:
+    - For BUY positions: new SL must be LOWER than entry (tightening = moving up, loosening = moving down)
+    - For SELL positions: new SL must be HIGHER than entry
+
+    For BUY: we only move SL UP (tighter), never DOWN (looser).
+    For SELL: we only move SL DOWN (tighter), never UP (looser).
+
+    TP can be updated freely.
+
+    Args:
+        client: Authenticated Capital.com client.
+        position: The open position to update.
+        new_sl: New stop loss level, or None to keep current.
+        new_tp: New take profit level, or None to keep current.
+
+    Returns:
+        UpdateResult with success status and details.
+    """
+    if not new_sl and not new_tp:
+        return UpdateResult(
+            success=False, deal_id=position.deal_id,
+            epic=position.epic, direction=position.direction,
+            error="No new SL or TP provided",
+        )
+
+    url = f"{client._base_url}/api/v1/positions/{position.deal_id}"
+
+    payload = {}
+    if new_sl is not None:
+        payload["stopLevel"] = round(new_sl, 2)
+    if new_tp is not None:
+        payload["profitLevel"] = round(new_tp, 2)
+
+    try:
+        resp = client._session.put(url, json=payload, timeout=15)
+        data = resp.json()
+
+        if resp.status_code == 200:
+            logger.info(
+                "Updated position %s: SL %s → %s, TP %s → %s",
+                position.deal_id,
+                f"{position.level - 0:.2f}" if not new_sl else f"{new_sl:.2f}",
+                f"{new_sl:.2f}" if new_sl else "unchanged",
+                "unchanged" if not new_tp else f"{new_tp:.2f}",
+                f"{new_tp:.2f}" if new_tp else "unchanged",
+            )
+            return UpdateResult(
+                success=True,
+                deal_id=position.deal_id,
+                epic=position.epic,
+                direction=position.direction,
+                new_sl=new_sl,
+                new_tp=new_tp,
+            )
+        else:
+            error_msg = data.get("errorCode", data.get("errorMessage", str(data)))
+            logger.error("Update position %s failed: %s", position.deal_id, error_msg)
+            return UpdateResult(
+                success=False, deal_id=position.deal_id,
+                epic=position.epic, direction=position.direction,
+                error=error_msg,
+            )
+
+    except requests.RequestException as e:
+        logger.error("Update position request failed: %s", e)
+        return UpdateResult(
+            success=False, deal_id=position.deal_id,
+            epic=position.epic, direction=position.direction,
+            error=str(e),
+        )
+
+
+def should_update_sl(
+    direction: str,
+    current_sl: float,
+    new_sl: float,
+    entry_price: float,
+) -> tuple[bool, str]:
+    """Check if a new SL is safe to apply.
+
+    Rules:
+    - For BUY: SL can only move UP (tighter). Moving SL DOWN (looser) is dangerous.
+    - For SELL: SL can only move DOWN (tighter). Moving SL UP (looser) is dangerous.
+    - New SL must not be too close to entry (min buffer).
+    - New SL must not be too aggressive (moved way too close to current price).
+
+    Returns (is_safe, reason).
+    """
+    min_sl_buffer_pct = 0.002  # SL must be at least 0.2% away from entry
+    max_sl_tighten_pct = 0.5   # SL can tighten at most 50% of original distance
+
+    if direction.upper() == "BUY":
+        # BUY: SL is below entry
+        original_distance = entry_price - current_sl
+        new_distance = entry_price - new_sl
+
+        if new_distance <= 0:
+            return False, f"New SL {new_sl:.2f} is above entry {entry_price:.2f} for BUY"
+
+        # Don't loosen SL (move it further down) — too risky
+        if new_sl < current_sl:
+            return False, (
+                f"New SL {new_sl:.2f} is BELOW current SL {current_sl:.2f} — "
+                f"loosening stop is dangerous"
+            )
+
+        # Don't tighten SL too aggressively (too close to entry)
+        min_buffer = entry_price * min_sl_buffer_pct
+        if new_distance < min_buffer:
+            return False, (
+                f"New SL too aggressive: only {new_distance:.2f} from entry "
+                f"(min {min_buffer:.2f}) — risk of noise stop-out"
+            )
+
+        # Don't tighten more than 50% of original distance
+        max_tighten = original_distance * (1 - max_sl_tighten_pct)
+        if new_distance < original_distance * max_sl_tighten_pct:
+            return False, (
+                f"New SL too tight: tightened {((1 - new_distance/original_distance)*100):.0f}% "
+                f"from original distance (max 50%)"
+            )
+
+        return True, "OK"
+
+    elif direction.upper() == "SELL":
+        # SELL: SL is above entry
+        original_distance = current_sl - entry_price
+        new_distance = new_sl - entry_price
+
+        if new_distance <= 0:
+            return False, f"New SL {new_sl:.2f} is below entry {entry_price:.2f} for SELL"
+
+        # Don't loosen SL (move it further up)
+        if new_sl > current_sl:
+            return False, (
+                f"New SL {new_sl:.2f} is ABOVE current SL {current_sl:.2f} — "
+                f"loosening stop is dangerous"
+            )
+
+        # Don't tighten SL too aggressively
+        min_buffer = entry_price * min_sl_buffer_pct
+        if new_distance < min_buffer:
+            return False, (
+                f"New SL too aggressive: only {new_distance:.2f} from entry "
+                f"(min {min_buffer:.2f}) — risk of noise stop-out"
+            )
+
+        # Don't tighten more than 50% of original distance
+        if new_distance < original_distance * max_sl_tighten_pct:
+            return False, (
+                f"New SL too tight: tightened {((1 - new_distance/original_distance)*100):.0f}% "
+                f"from original distance (max 50%)"
+            )
+
+        return True, "OK"
+
+    return False, f"Unknown direction: {direction}"
+
+
 def check_timeouts(client: CapitalComClient) -> list[CloseResult]:
     """Check all open positions and close any that have exceeded their max hold time.
 

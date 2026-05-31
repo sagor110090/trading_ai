@@ -1,4 +1,12 @@
-"""Main orchestrator: wires all system components for the prediction loop."""
+"""Main orchestrator: wires all system components for the prediction loop.
+
+Key behaviors:
+- Signals are ALWAYS generated (for ML training), but trade execution is controlled
+- If a new signal opposes an open position, the old position is CLOSED and reversed
+- If a new signal agrees with an open position, the trade is skipped (already in it)
+- After a loss, a cooldown prevents immediate re-entry
+- Duplicate signals (same symbol+direction within a window) are not stored
+"""
 
 import logging
 import sys
@@ -20,40 +28,39 @@ from trading_ai.display import (
     display_candle_fetch,
     display_cycle_header,
     display_cycle_summary,
+    display_duplicate_signal,
     display_ml_prediction,
     display_no_ml_model,
     display_no_signal,
+    display_position_reversed,
     display_signal,
+    display_signal_skipped_cooldown,
     display_timeout_closed,
     display_trade_blocked,
     display_trade_failed,
     display_trade_placed,
+    display_trade_skipped_cooldown,
     display_trade_skipped_existing,
     display_verification_summary,
 )
 from trading_ai.indicators.features import compute_all_features
 from trading_ai.ml.predictor import Prediction, predict_signal
 from trading_ai.signals.engine import TradeSignal, generate_signal
+from trading_ai.trade.executor import close_position
+from trading_ai.trade.position_manager import PositionManager
 from trading_ai.verification.verifier import verify_pending_signals
 
 logger = logging.getLogger(__name__)
 
 
 def _setup_logging() -> None:
-    """Configure logging with Rich handler for beautiful output.
-
-    Submodule logs at INFO level are suppressed — only WARNING and above
-    appear in the console. The display module handles all INFO-level output.
-    """
-    # Rich handler for the root logger (catches WARNING+ from submodules)
+    """Configure logging with Rich handler for beautiful output."""
     logging.basicConfig(
         level="WARNING",
         format="%(message)s",
         datefmt="[%X]",
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
-
-    # Set __main__ logger to DEBUG so display-level info still works if needed
     logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 
@@ -180,12 +187,21 @@ def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.D
     return pd.DataFrame(rows)
 
 
-def run_signal_cycle(client: CapitalComClient) -> None:
-    """One complete cycle: fetch data for all timeframes, run confluence, verify, predict."""
+def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager) -> None:
+    """One complete cycle: fetch data for all timeframes, run confluence, verify, predict.
+
+    The position_manager controls trade execution:
+    - Same direction as open position → skip (already in this trade)
+    - Opposite direction → close old position and take new one (reversal)
+    - No position + no cooldown → place trade
+    - Cooldown active → skip trade
+    """
+    # Clean up expired cooldowns
+    position_manager.cleanup_expired_cooldowns()
+
     for symbol in SETTINGS.symbols:
         display_cycle_header(symbol.value)
 
-        # Track cycle results for summary
         stats = {
             "signal_generated": False,
             "ml_prediction": None,
@@ -195,7 +211,10 @@ def run_signal_cycle(client: CapitalComClient) -> None:
             "trade_placed": False,
             "trade_blocked": False,
             "trade_skipped": False,
+            "trade_cooldown": False,
+            "trade_reversed": False,
             "trade_failed": False,
+            "sl_updated": False,
             "verified": 0,
             "auto_train_started": False,
             "timeout_closed": False,
@@ -205,7 +224,7 @@ def run_signal_cycle(client: CapitalComClient) -> None:
 
         # ── 0. Check position timeouts ──────────────────────────────────
         if SETTINGS.auto_trade:
-            _check_timeouts(client, stats)
+            _check_timeouts(client, stats, position_manager, symbol.value)
 
         # ── 1. Fetch and store candles ──────────────────────────────────
         candle_results: dict[str, int] = {}
@@ -238,7 +257,20 @@ def run_signal_cycle(client: CapitalComClient) -> None:
         display_verification_summary(verified, pending_count)
         stats["verified"] = verified
 
-        # ── 3. Multi-timeframe confluence signal ────────────────────────
+        # Register verified losses as cooldowns
+        if verified > 0:
+            _register_verified_results(symbol.value, position_manager)
+
+        # ── 3. Check if we should skip signal generation ─────────────────
+        should_generate, skip_reason = position_manager.should_generate_signal(symbol.value)
+        if not should_generate:
+            display_signal_skipped_cooldown(symbol.value, 0)  # reason already logged
+            # Still verify and auto-train, but don't generate new signals
+            _try_auto_train(symbol.value, stats)
+            display_cycle_summary(stats)
+            continue
+
+        # ── 4. Multi-timeframe confluence signal ────────────────────────
         df_h4 = fetched.get(Timeframe.H4.value, pd.DataFrame())
         df_h1 = fetched.get(Timeframe.H1.value, pd.DataFrame())
         df_m5 = fetched.get(Timeframe.M5.value, pd.DataFrame())
@@ -247,6 +279,24 @@ def run_signal_cycle(client: CapitalComClient) -> None:
             trade_signal = generate_signal(df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode)
 
             if trade_signal:
+                # ── Signal dedup: skip storing if duplicate ──────────
+                if position_manager.is_duplicate_signal(
+                    trade_signal.symbol, trade_signal.signal.value, SETTINGS.trade_mode.value
+                ):
+                    display_duplicate_signal(trade_signal.symbol, trade_signal.signal.value)
+                    # Don't store, don't trade, but still show the signal was detected
+                    stats["signal_generated"] = True
+                    stats["signal"] = trade_signal
+                    display_signal(trade_signal)
+
+                    # Even for duplicates, check if we should reverse
+                    if SETTINGS.auto_trade:
+                        _handle_trade_decision(client, trade_signal, position_manager, stats)
+
+                    _try_auto_train(symbol.value, stats)
+                    display_cycle_summary(stats)
+                    continue
+
                 _store_signal(trade_signal)
                 display_signal(trade_signal)
                 stats["signal_generated"] = True
@@ -270,7 +320,7 @@ def run_signal_cycle(client: CapitalComClient) -> None:
 
                 # ── Auto-trade ──────────────────────────────────────────
                 if SETTINGS.auto_trade and should_trade:
-                    _execute_trade(client, trade_signal, stats)
+                    _handle_trade_decision(client, trade_signal, position_manager, stats)
                 elif SETTINGS.auto_trade and not should_trade:
                     display_trade_blocked("ML filter")
                     stats["trade_blocked"] = True
@@ -280,16 +330,136 @@ def run_signal_cycle(client: CapitalComClient) -> None:
         else:
             logger.warning("Missing H4 or H1 data for confluence check on %s", symbol.value)
 
-        # ── 4. Auto-train ───────────────────────────────────────────────
+        # ── 5. Auto-train ───────────────────────────────────────────────
         _try_auto_train(symbol.value, stats)
 
         # ── Cycle summary ───────────────────────────────────────────────
         display_cycle_summary(stats)
 
 
-def _check_timeouts(client: CapitalComClient, stats: dict) -> None:
+def _handle_trade_decision(
+    client: CapitalComClient,
+    trade_signal: TradeSignal,
+    position_manager: PositionManager,
+    stats: dict,
+) -> None:
+    """Evaluate and execute a trade based on position state.
+
+    Handles four scenarios:
+    1. No position, no cooldown → place new trade
+    2. Same direction position → UPDATE SL/TP (trail the stop)
+    3. Opposite direction position → close old, place new (reversal)
+    4. Cooldown active → skip
+    """
+    from trading_ai.trade.executor import OrderResult
+
+    decision = position_manager.evaluate_trade(
+        trade_signal.symbol,
+        trade_signal.signal.value,
+        trade_signal.stop_loss,
+        trade_signal.take_profit,
+    )
+
+    if decision.action == "update_sl_tp":
+        # Same direction — update SL/TP on existing position
+        result = position_manager.execute_trade_decision(trade_signal, decision)
+
+        if result.get("sl_updated"):
+            console.print(
+                f"  [cyan]📐 SL/TP Updated:[/] "
+                f"SL→{trade_signal.stop_loss:,.2f}  TP→{trade_signal.take_profit:,.2f}  "
+                f"[dim]({decision.reason})[/]"
+            )
+            stats["sl_updated"] = True
+        else:
+            # Update was rejected (unsafe) or failed — position still open, just not updated
+            console.print(
+                f"  [yellow]⏭  SL update skipped:[/] {result.get('reason', 'unknown')}"
+            )
+            stats["trade_skipped"] = True
+        return
+
+    if decision.action == "skip_cooldown":
+        # Cooldown active after a loss/timeout
+        display_trade_skipped_cooldown(trade_signal.symbol, decision.cooldown_remaining_minutes)
+        stats["trade_cooldown"] = True
+        return
+
+    if decision.action == "reverse_and_place":
+        # Close existing position, then place new one
+        pos = decision.existing_position
+        console.print(
+            f"  [yellow]🔄 Reversing:[/] closing {pos.direction} {pos.epic} "
+            f"to take {trade_signal.signal.value}"
+        )
+        close_result = close_position(client, pos)
+
+        if not close_result.success:
+            console.print(
+                f"  [red]✗ Failed to close position:[/] {close_result.error}"
+            )
+            stats["trade_failed"] = True
+            return
+
+        # Register the closed position
+        position_manager.register_closed(trade_signal.symbol, "reversal")
+        display_position_reversed(
+            f"{pos.direction} {pos.epic} (deal {pos.deal_id})",
+            trade_signal.signal.value,
+            trade_signal.symbol,
+        )
+        stats["trade_reversed"] = True
+
+    if decision.action in ("place", "reverse_and_place"):
+        # Place the trade
+        from trading_ai.trade.executor import place_trade
+
+        size = SETTINGS.get_trade_size(trade_signal.symbol)
+        result = place_trade(client, trade_signal, size=size)
+
+        if result.success:
+            display_trade_placed(result)
+            stats["trade_placed"] = True
+        else:
+            if "already exists" in (result.error or "").lower():
+                display_trade_skipped_existing(trade_signal.symbol)
+                stats["trade_skipped"] = True
+            else:
+                display_trade_failed(result)
+                stats["trade_failed"] = True
+
+
+def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
+    """Check verified results from this cycle and register cooldowns for losses."""
+    session = next(get_session())
+
+    # Find recently verified losses for this symbol
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    recent_losses = (
+        session.query(SignalVerification)
+        .join(Signal, SignalVerification.signal_id == Signal.id)
+        .filter(
+            Signal.symbol == symbol,
+            SignalVerification.result == "LOSS",
+            SignalVerification.verified_at >= cutoff,
+        )
+        .all()
+    )
+
+    for loss in recent_losses:
+        position_manager.register_verified_result(symbol, "LOSS")
+
+
+def _check_timeouts(
+    client: CapitalComClient,
+    stats: dict,
+    position_manager: PositionManager,
+    symbol: str,
+) -> None:
     """Check open positions and close any that exceeded their max hold time."""
-    from trading_ai.trade.executor import check_timeouts, get_open_positions
+    from trading_ai.trade.executor import check_timeouts
 
     max_minutes = SETTINGS.get_max_hold_minutes()
     results = check_timeouts(client)
@@ -297,6 +467,7 @@ def _check_timeouts(client: CapitalComClient, stats: dict) -> None:
     for result in results:
         if result.success:
             stats["timeout_closed"] = True
+            position_manager.register_closed(symbol, "timeout")
             console.print(
                 f"  [yellow]⏰ Closed[/] {result.direction} {result.epic} "
                 f"[dim](held over {max_minutes} min)[/]"
@@ -307,42 +478,8 @@ def _check_timeouts(client: CapitalComClient, stats: dict) -> None:
             )
 
 
-def _execute_trade(client: CapitalComClient, trade_signal: TradeSignal, stats: dict) -> None:
-    """Execute a trade on Capital.com."""
-    from trading_ai.trade.executor import place_trade, has_open_position
-    from trading_ai.data.collector import _EPIC_MAP
-
-    symbol_enum = Symbol(trade_signal.symbol)
-    epic = _EPIC_MAP.get(symbol_enum)
-
-    # Check for existing position first
-    if epic:
-        existing = has_open_position(client, epic)
-        if existing:
-            display_trade_skipped_existing(trade_signal.symbol)
-            stats["trade_skipped"] = True
-            return
-
-    size = SETTINGS.get_trade_size(trade_signal.symbol)
-    result = place_trade(client, trade_signal, size=size)
-
-    if result.success:
-        display_trade_placed(result)
-        stats["trade_placed"] = True
-    else:
-        if "already exists" in (result.error or "").lower():
-            display_trade_skipped_existing(trade_signal.symbol)
-            stats["trade_skipped"] = True
-        else:
-            display_trade_failed(result)
-            stats["trade_failed"] = True
-
-
 def _try_auto_train(symbol: str, stats: dict) -> None:
-    """Auto-train ML models if enough verified signals exist.
-
-    Only trains when new verified signals have been added since the last training.
-    """
+    """Auto-train ML models if enough verified signals exist."""
     from trading_ai.backtesting.walk_forward import run_walk_forward
     from trading_ai.data.models import MLModelMeta, SignalVerification
 
@@ -362,7 +499,6 @@ def _try_auto_train(symbol: str, stats: dict) -> None:
         display_auto_train_waiting(verified_count, min_signals)
         return
 
-    # Check if we already trained on this many verified signals
     last_train_count = None
     try:
         latest_model = (
@@ -394,9 +530,43 @@ def _try_auto_train(symbol: str, stats: dict) -> None:
         logger.error("Auto-train failed for %s: %s", symbol, e)
 
 
+def run_loop(client: CapitalComClient, position_manager: PositionManager, interval: int = 300) -> None:
+    """Run the signal cycle in a loop with the given interval in seconds.
+
+    This keeps the PositionManager alive between cycles so cooldowns
+    and position state persist correctly.
+    """
+    import time
+    from rich.text import Text
+
+    while True:
+        try:
+            run_signal_cycle(client, position_manager)
+        except Exception as e:
+            logger.error("Cycle error: %s", e)
+            console.print(f"[red]✗ Cycle error: {e}[/]")
+
+        console.print()
+        console.print(f"[dim]Next cycle in {interval // 60} min {interval % 60}s...[/]")
+        console.print(f"[dim]Press Ctrl+C to stop[/]")
+        console.print()
+        time.sleep(interval)
+
+
 def main() -> None:
-    """Main entry point."""
+    """Main entry point. Supports two modes:
+    - Single cycle (default): python -m trading_ai.main
+    - Continuous loop: python -m trading_ai.main --loop [--interval SECONDS]
+    """
+    import argparse
+    import time
+
     _setup_logging()
+
+    parser = argparse.ArgumentParser(description="Trading AI")
+    parser.add_argument("--loop", action="store_true", help="Run continuously in a loop")
+    parser.add_argument("--interval", type=int, default=300, help="Loop interval in seconds (default: 300)")
+    args = parser.parse_args()
 
     console.print("[bold cyan]Trading AI[/] starting...")
     create_tables()
@@ -407,7 +577,17 @@ def main() -> None:
         sys.exit(1)
 
     console.print("[green]✓ Authenticated with Capital.com[/]")
-    run_signal_cycle(client)
+
+    # Create position manager — persists across cycles
+    position_manager = PositionManager(client)
+    position_manager.sync_positions()
+
+    if args.loop:
+        console.print(f"[cyan]Running in loop mode (every {args.interval}s)[/]")
+        run_loop(client, position_manager, interval=args.interval)
+    else:
+        # Single cycle mode (for external loops like run_all.sh)
+        run_signal_cycle(client, position_manager)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,9 @@
-"""Signal scoring: weighted multi-factor confidence calculation."""
+"""Signal scoring: weighted multi-factor confidence calculation.
+
+Direction is determined by the EMA trend (the primary directional indicator).
+If EMAs show a clear trend, that's the direction — even if RSI or MACD are neutral.
+RSI and MACD contribute to confidence (strength) but shouldn't veto direction.
+"""
 
 import logging
 from dataclasses import dataclass
@@ -54,14 +59,17 @@ def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float) ->
 
 
 def _score_rsi(rsi: float) -> float:
-    """Score RSI factor. Returns 0 to WEIGHTS.rsi."""
+    """Score RSI factor. Returns 0 to WEIGHTS.rsi.
+
+    Scores signal STRENGTH, not direction.
+    Overbought/oversold = strong signal, neutral = weak signal.
+    """
     if pd.isna(rsi):
         return 0.0
 
     max_score = WEIGHTS.rsi
 
-    # Oversold = bullish signal strength, Overbought = bearish signal strength
-    # We score the *strength* of the signal, not its direction
+    # Strong zones
     if rsi <= 20:
         return max_score
     elif rsi <= 30:
@@ -70,7 +78,7 @@ def _score_rsi(rsi: float) -> float:
         return max_score
     elif rsi >= 70:
         return max_score * (rsi - 70) / 10.0
-    # Neutral zone
+    # Neutral zone — still scores a little (signal exists, just not strong)
     return max_score * 0.1
 
 
@@ -85,14 +93,13 @@ def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float
     # Histogram direction and magnitude
     hist_abs = abs(macd_hist)
     if hist_abs > 0:
-        # Normalise: stronger histogram = stronger signal
         magnitude = min(hist_abs / (hist_abs + 1e-9), 1.0)
         score = max_score * 0.6 * magnitude
 
     # Crossover bonus
     if not pd.isna(macd_line) and not pd.isna(macd_signal):
         if abs(macd_line - macd_signal) < hist_abs * 0.3:
-            score += max_score * 0.4  # near crossover = strong signal
+            score += max_score * 0.4
 
     return min(score, max_score)
 
@@ -109,11 +116,11 @@ def _score_atr(atr: float, close: float) -> float:
     if 0.05 <= atr_pct <= 0.5:
         return max_score
     elif atr_pct < 0.05:
-        return max_score * atr_pct / 0.05  # too quiet
+        return max_score * atr_pct / 0.05
     elif atr_pct <= 1.0:
-        return max_score * (1.0 - (atr_pct - 0.5) / 0.5) * 0.7  # elevated
+        return max_score * (1.0 - (atr_pct - 0.5) / 0.5) * 0.7
     else:
-        return max_score * 0.2  # extreme vol
+        return max_score * 0.2
 
 
 def _score_structure(candle_body_pct: float, upper_wick_pct: float, lower_wick_pct: float) -> float:
@@ -124,7 +131,6 @@ def _score_structure(candle_body_pct: float, upper_wick_pct: float, lower_wick_p
     upper = upper_wick_pct if not pd.isna(upper_wick_pct) else 0.0
     lower = lower_wick_pct if not pd.isna(lower_wick_pct) else 0.0
 
-    # Strong directional candles have large bodies and small wicks
     total = body_abs + upper + lower
     if total == 0:
         return 0.0
@@ -140,11 +146,41 @@ def _score_momentum(momentum_score: float, trend_strength: float) -> float:
 
     max_score = WEIGHTS.momentum
 
-    # Momentum and trend alignment amplifies confidence
     alignment = abs(momentum_score + trend_strength) / 200.0
     magnitude = (abs(momentum_score) + abs(trend_strength)) / 200.0
 
     return max_score * alignment * magnitude
+
+
+def _determine_ema_direction(ema20: float, ema50: float, ema200: float, close: float) -> SignalType:
+    """Determine direction from EMA alignment.
+
+    EMAs are the primary direction indicator. If price is above key EMAs → BUY.
+    If price is below key EMAs → SELL. If EMAs are mixed → NO_TRADE.
+    """
+    if pd.isna(ema20) or pd.isna(ema50):
+        return SignalType.NO_TRADE
+
+    # Strong alignment: all EMAs agree
+    if not pd.isna(ema200):
+        if ema20 > ema50 > ema200 and close > ema20:
+            return SignalType.BUY
+        if ema20 < ema50 < ema200 and close < ema20:
+            return SignalType.SELL
+
+    # Partial alignment: EMA20 and EMA50 agree
+    if ema20 > ema50 and close > ema20:
+        return SignalType.BUY
+    if ema20 < ema50 and close < ema20:
+        return SignalType.SELL
+
+    # Weak: price vs EMA20 only
+    if close > ema20:
+        return SignalType.BUY
+    if close < ema20:
+        return SignalType.SELL
+
+    return SignalType.NO_TRADE
 
 
 def compute_signal_scores(
@@ -165,17 +201,30 @@ def compute_signal_scores(
 ) -> tuple[FactorScores, SignalType]:
     """Compute weighted factor scores and determine signal direction.
 
-    Returns (FactorScores, signal_type).
-    The signal_type is based on whether the factors collectively favour BUY or SELL.
-    """
-    # Determine direction from EMAs and price
-    bullish = (
-        (not pd.isna(ema20) and close > ema20)
-        and (not pd.isna(ema50) and close > ema50)
-    ) or (
-        not pd.isna(ema20) and not pd.isna(ema50) and ema20 > ema50
-    )
+    Direction is primarily determined by EMA trend alignment.
+    Confidence (total score) measures HOW STRONG the signal is.
+    RSI and MACD affect confidence but don't override EMA direction.
 
+    This means: if EMAs say BUY but RSI is neutral (40-60), we still get BUY
+    with moderate confidence. The old logic would give NO_TRADE because
+    neutral RSI voted for neither side.
+    """
+    # Direction from EMAs (primary)
+    direction = _determine_ema_direction(ema20, ema50, ema200, close)
+
+    if direction == SignalType.NO_TRADE:
+        # EMAs are flat/unclear — try MACD as fallback
+        if not pd.isna(macd_histogram):
+            if macd_histogram > 0 and not pd.isna(macd_line) and macd_line > macd_signal:
+                direction = SignalType.BUY
+            elif macd_histogram < 0 and not pd.isna(macd_line) and macd_line < macd_signal:
+                direction = SignalType.SELL
+            else:
+                return FactorScores(0, 0, 0, 0, 0, 0, 0), SignalType.NO_TRADE
+        else:
+            return FactorScores(0, 0, 0, 0, 0, 0, 0), SignalType.NO_TRADE
+
+    # Compute all factor scores
     ema_score = _score_ema_trend(ema20, ema50, ema200, close)
     rsi_score = _score_rsi(rsi)
     macd_score = _score_macd(macd_histogram, macd_line, macd_signal)
@@ -185,21 +234,39 @@ def compute_signal_scores(
 
     total = ema_score + rsi_score + macd_score + atr_score + struct_score + mom_score
 
-    # Direction: check RSI and MACD for directional hint
-    rsi_bullish = not pd.isna(rsi) and rsi < 40
-    rsi_bearish = not pd.isna(rsi) and rsi > 60
-    macd_bullish = not pd.isna(macd_histogram) and macd_histogram > 0
-    macd_bearish = not pd.isna(macd_histogram) and macd_histogram < 0
+    # Adjust total based on direction confirmation from RSI and MACD
+    # These add/subtract from confidence, they don't veto direction
+    confirmation_bonus = 0.0
 
-    bull_count = sum([bullish, rsi_bullish, macd_bullish])
-    bear_count = sum([not bullish, rsi_bearish, macd_bearish])
+    if direction == SignalType.BUY:
+        # RSI confirms buy (oversold → bouncing)
+        if not pd.isna(rsi) and rsi < 40:
+            confirmation_bonus += 5.0
+        # MACD confirms buy
+        if not pd.isna(macd_histogram) and macd_histogram > 0:
+            confirmation_bonus += 5.0
+        # RSI contradicts (overbought → risky buy)
+        if not pd.isna(rsi) and rsi > 70:
+            confirmation_bonus -= 8.0
+        # MACD contradicts
+        if not pd.isna(macd_histogram) and macd_histogram < 0:
+            confirmation_bonus -= 5.0
 
-    if bull_count > bear_count:
-        direction = SignalType.BUY
-    elif bear_count > bull_count:
-        direction = SignalType.SELL
-    else:
-        direction = SignalType.NO_TRADE
+    elif direction == SignalType.SELL:
+        # RSI confirms sell (overbought → dropping)
+        if not pd.isna(rsi) and rsi > 60:
+            confirmation_bonus += 5.0
+        # MACD confirms sell
+        if not pd.isna(macd_histogram) and macd_histogram < 0:
+            confirmation_bonus += 5.0
+        # RSI contradicts (oversold → risky sell)
+        if not pd.isna(rsi) and rsi < 30:
+            confirmation_bonus -= 8.0
+        # MACD contradicts
+        if not pd.isna(macd_histogram) and macd_histogram > 0:
+            confirmation_bonus -= 5.0
+
+    total = max(0.0, total + confirmation_bonus)
 
     scores = FactorScores(
         ema_trend=ema_score,

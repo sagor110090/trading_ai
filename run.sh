@@ -30,22 +30,6 @@ echo "  Running every $INTERVAL_TEXT"
 echo "  Press Ctrl+C to stop"
 echo "=========================================="
 
-cleanup() {
-    echo ""
-    echo "Stopping Trading AI..."
-    jobs -p | xargs kill 2>/dev/null
-    echo "Stopped."
-    exit 0
-}
-
-trap cleanup SIGINT SIGTERM
-
-while true; do
-    echo ""
-    echo "--- Cycle at $(date '+%Y-%m-%d %H:%M:%S') ---"
-    python3 -m trading_ai.main
-    echo ""
-    echo "Next cycle in $INTERVAL_TEXT at $(date -v+${INTERVAL}S '+%Y-%m-%d %H:%M:%S')"
-    echo "Waiting... (Ctrl+C to stop)"
-    sleep "$INTERVAL"
-done
+# Use --loop so PositionManager (cooldowns, position tracking) persists
+# between cycles. Without --loop, cooldowns are lost each cycle.
+python3 -m trading_ai.main --loop --interval "$INTERVAL"

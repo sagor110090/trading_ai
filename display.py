@@ -147,6 +147,38 @@ def display_trade_skipped_existing(symbol: str) -> None:
     console.print(f"  [yellow]⏭  Skipped: open position already exists for {symbol}[/]")
 
 
+def display_trade_skipped_cooldown(symbol: str, remaining_min: float) -> None:
+    """Show that a trade was skipped because a cooldown is active."""
+    console.print(
+        f"  [yellow]⏭  Cooldown: {remaining_min:.0f} min remaining for {symbol}[/]"
+    )
+
+
+def display_signal_skipped_cooldown(symbol: str, remaining_min: float) -> None:
+    """Show that signal generation was skipped due to cooldown."""
+    console.print(
+        f"  [yellow]⏭  Signal skipped: loss cooldown for {symbol} "
+        f"({remaining_min:.0f} min remaining)[/]"
+    )
+
+
+def display_position_reversed(closed_info: str, new_direction: str, symbol: str) -> None:
+    """Show that an existing position was closed to reverse direction."""
+    content = (
+        f"  [yellow]🔄 REVERSED[/]  Closed {closed_info}\n"
+        f"  [bold]{'[green]BUY[/]' if new_direction == 'BUY' else '[red]SELL[/]'}[/] "
+        f"{symbol} — opposite signal detected"
+    )
+    console.print(Panel(content, title="[bold yellow]Position Reversed[/]", border_style="yellow", padding=(0, 2)))
+
+
+def display_duplicate_signal(symbol: str, direction: str) -> None:
+    """Show that a signal was not stored because it's a duplicate."""
+    console.print(
+        f"  [dim]⏭  Duplicate {direction} {symbol} signal — not stored (same direction within dedup window)[/]"
+    )
+
+
 # ── Auto-Train ────────────────────────────────────────────────────────────
 
 
@@ -223,6 +255,12 @@ def display_cycle_summary(stats: dict) -> None:
         lines.append("✅ [green]Trade placed[/]")
     elif stats.get("trade_blocked"):
         lines.append("🔒 [yellow]Trade blocked[/]")
+    elif stats.get("sl_updated"):
+        lines.append("📐 [cyan]SL/TP updated (trailing stop)[/]")
+    elif stats.get("trade_reversed"):
+        lines.append("🔄 [yellow]Position reversed[/]")
+    elif stats.get("trade_cooldown"):
+        lines.append("⏭  [yellow]Trade skipped (cooldown)[/]")
     elif stats.get("trade_skipped"):
         lines.append("⏭  [dim]Trade skipped[/]")
     elif stats.get("trade_failed"):
