@@ -15,10 +15,10 @@ from typing import Optional
 import pandas as pd
 from rich.logging import RichHandler
 
-from trading_ai.config.settings import SETTINGS, Symbol, Timeframe
+from trading_ai.config.settings import SETTINGS, Symbol, Timeframe, TradingPlatform
 from trading_ai.data.collector import CapitalComClient
 from trading_ai.data.database import create_tables, get_session
-from trading_ai.data.models import Candle, Signal
+from trading_ai.data.models import Candle, Signal, SignalVerification
 from trading_ai.display import (
     console,
     display_auto_train_result,
@@ -46,11 +46,47 @@ from trading_ai.display import (
 from trading_ai.indicators.features import compute_all_features
 from trading_ai.ml.predictor import Prediction, predict_signal
 from trading_ai.signals.engine import TradeSignal, generate_signal
-from trading_ai.trade.executor import close_position
+from trading_ai.trade.executor import (
+    close_position_unified,
+    get_trailing_stop_candidate,
+    place_trade_unified,
+    update_position_sl_tp_unified,
+)
 from trading_ai.trade.position_manager import PositionManager
 from trading_ai.verification.verifier import verify_pending_signals
 
 logger = logging.getLogger(__name__)
+
+
+def _create_client():
+    """Create the appropriate trading client based on platform selection."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        from trading_ai.data.mt5_client import MT5Client
+        return MT5Client()
+    else:
+        return CapitalComClient()
+
+
+def _authenticate_client(client) -> bool:
+    """Authenticate the trading client."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        success = client.connect()
+        if success:
+            console.print("[green]✓ Connected to MetaTrader 5[/]")
+            # Display account info
+            account = client.get_account_info()
+            if account:
+                console.print(f"[dim]  Balance: ${account['balance']:.2f} | Equity: ${account['equity']:.2f}[/]")
+        else:
+            console.print("[bold red]✗ Cannot connect to MetaTrader 5. Make sure MT5 terminal is running.[/]")
+        return success
+    else:
+        success = client.authenticate()
+        if success:
+            console.print("[green]✓ Authenticated with Capital.com[/]")
+        else:
+            console.print("[bold red]✗ Cannot authenticate with Capital.com. Check credentials.[/]")
+        return success
 
 
 def _setup_logging() -> None:
@@ -275,8 +311,27 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
         df_h1 = fetched.get(Timeframe.H1.value, pd.DataFrame())
         df_m5 = fetched.get(Timeframe.M5.value, pd.DataFrame())
 
+        # Fetch live price so the signal entry reflects current market
+        live_price = None
+        price_data = None
+        try:
+            price_data = client.get_latest_price(symbol)
+            if price_data:
+                if SETTINGS.trading_platform == TradingPlatform.MT5:
+                    live_price = price_data["ask"] if price_data.get("ask") else price_data.get("bid")
+                else:
+                    live_price = price_data.get("bid") or price_data.get("ask")
+                logger.info("Live %s price: %.2f", symbol.value, live_price)
+        except Exception as e:
+            logger.warning("Could not fetch live price for %s: %s", symbol.value, e)
+
+        if SETTINGS.auto_trade and SETTINGS.trailing_stop_enabled:
+            _apply_profit_trailing(client, symbol, price_data, position_manager, stats)
+
         if not df_h4.empty and not df_h1.empty:
-            trade_signal = generate_signal(df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode)
+            trade_signal = generate_signal(
+                df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode, live_price=live_price,
+            )
 
             if trade_signal:
                 # ── Signal dedup: skip storing if duplicate ──────────
@@ -392,7 +447,7 @@ def _handle_trade_decision(
             f"  [yellow]🔄 Reversing:[/] closing {pos.direction} {pos.epic} "
             f"to take {trade_signal.signal.value}"
         )
-        close_result = close_position(client, pos)
+        close_result = close_position_unified(client, pos)
 
         if not close_result.success:
             console.print(
@@ -412,10 +467,8 @@ def _handle_trade_decision(
 
     if decision.action in ("place", "reverse_and_place"):
         # Place the trade
-        from trading_ai.trade.executor import place_trade
-
         size = SETTINGS.get_trade_size(trade_signal.symbol)
-        result = place_trade(client, trade_signal, size=size)
+        result = place_trade_unified(client, trade_signal, size=size)
 
         if result.success:
             display_trade_placed(result)
@@ -427,6 +480,53 @@ def _handle_trade_decision(
             else:
                 display_trade_failed(result)
                 stats["trade_failed"] = True
+
+
+def _apply_profit_trailing(
+    client,
+    symbol: Symbol,
+    price_data: Optional[dict],
+    position_manager: PositionManager,
+    stats: dict,
+) -> None:
+    """Move SL forward as profit milestones are reached."""
+    if not price_data:
+        return
+
+    position_manager.sync_positions()
+    status = position_manager.get_status(symbol.value)
+
+    for pos in status["open_positions"]:
+        new_sl, milestone = get_trailing_stop_candidate(pos, price_data)
+        if new_sl is None or milestone is None:
+            continue
+
+        old_sl = pos.stop_level
+        current_price = (
+            price_data.get("bid") or price_data.get("ask")
+            if pos.direction.upper() == "BUY"
+            else price_data.get("ask") or price_data.get("bid")
+        )
+        old_sl_text = f"{old_sl:,.2f}" if old_sl is not None else "none"
+        current_price_text = f"{current_price:,.2f}" if current_price is not None else "n/a"
+        update_result = update_position_sl_tp_unified(client, pos, new_sl=new_sl)
+        if not update_result.success:
+            logger.warning(
+                "Profit trail update failed for %s %s: %s",
+                pos.direction,
+                pos.epic,
+                update_result.error,
+            )
+            continue
+
+        console.print(
+            f"  [cyan]📐 Profit trail:[/] "
+            f"{pos.direction} {symbol.value} hit {milestone} TP "
+            f"| [dim]price[/] {current_price_text} "
+            f"| [dim]SL[/] {old_sl_text} → {new_sl:,.2f}"
+        )
+        stats["sl_updated"] = True
+        position_manager.sync_positions()
 
 
 def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
@@ -453,16 +553,16 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
 
 
 def _check_timeouts(
-    client: CapitalComClient,
+    client,
     stats: dict,
     position_manager: PositionManager,
     symbol: str,
 ) -> None:
     """Check open positions and close any that exceeded their max hold time."""
-    from trading_ai.trade.executor import check_timeouts
+    from trading_ai.trade.executor import check_timeouts_unified
 
     max_minutes = SETTINGS.get_max_hold_minutes()
-    results = check_timeouts(client)
+    results = check_timeouts_unified(client)
 
     for result in results:
         if result.success:
@@ -568,15 +668,14 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=300, help="Loop interval in seconds (default: 300)")
     args = parser.parse_args()
 
-    console.print("[bold cyan]Trading AI[/] starting...")
+    platform_name = "MetaTrader 5" if SETTINGS.trading_platform == TradingPlatform.MT5 else "Capital.com"
+    console.print(f"[bold cyan]Trading AI[/] starting...")
+    console.print(f"[dim]Platform: {platform_name}[/]")
     create_tables()
 
-    client = CapitalComClient()
-    if not client.authenticate():
-        console.print("[bold red]✗ Cannot authenticate with Capital.com. Check credentials.[/]")
+    client = _create_client()
+    if not _authenticate_client(client):
         sys.exit(1)
-
-    console.print("[green]✓ Authenticated with Capital.com[/]")
 
     # Create position manager — persists across cycles
     position_manager = PositionManager(client)

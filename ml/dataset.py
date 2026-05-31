@@ -93,6 +93,10 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
         logger.warning("No verified signals found for dataset")
         return df
 
+    # Convert timestamp strings to datetime objects
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+
     # Encode target: WIN=1, LOSS=0
     df[TARGET_COLUMN] = (df["result"] == SignalResult.WIN.value).astype(int)
 

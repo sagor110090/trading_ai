@@ -1,14 +1,14 @@
-"""Trade executor: places orders on Capital.com when auto-trade is enabled."""
+"""Trade executor: places orders on Capital.com or MT5 when auto-trade is enabled."""
 
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 import requests
 
-from trading_ai.config.settings import SETTINGS, SignalType, Symbol, TradeMode
+from trading_ai.config.settings import SETTINGS, SignalType, Symbol, TradeMode, TradingPlatform
 from trading_ai.data.collector import CapitalComClient, _EPIC_MAP
 from trading_ai.signals.engine import TradeSignal
 
@@ -23,6 +23,8 @@ class OpenPosition:
     direction: str
     size: float
     level: float
+    stop_level: Optional[float]
+    profit_level: Optional[float]
     upl: float
     created_date: str
 
@@ -53,6 +55,19 @@ class OrderResult:
     error: Optional[str] = None
 
 
+def _normalize_level(level: Optional[Union[int, float]]) -> Optional[float]:
+    """Convert broker level values to floats and treat zero/None as missing."""
+    if level is None:
+        return None
+
+    try:
+        parsed = float(level)
+    except (TypeError, ValueError):
+        return None
+
+    return parsed if parsed > 0 else None
+
+
 def get_open_positions(client: CapitalComClient) -> list[OpenPosition]:
     """Fetch all currently open positions from Capital.com."""
     url = f"{client._base_url}/api/v1/positions"
@@ -76,6 +91,8 @@ def get_open_positions(client: CapitalComClient) -> list[OpenPosition]:
             direction=pos.get("direction", ""),
             size=float(pos.get("size", 0)),
             level=float(pos.get("level", 0)),
+            stop_level=_normalize_level(pos.get("stopLevel")),
+            profit_level=_normalize_level(pos.get("profitLevel", pos.get("limitLevel"))),
             upl=float(pos.get("upl", 0)),
             created_date=pos.get("createdDateUTC", pos.get("createdDate", "")),
         ))
@@ -520,3 +537,344 @@ def check_timeouts(client: CapitalComClient) -> list[CloseResult]:
             continue
 
     return results
+
+
+# ==================== MT5 FUNCTIONS ====================
+
+from trading_ai.data.mt5_client import place_order as mt5_place_order, close_position as mt5_close_position
+from trading_ai.data.mt5_client import update_position_levels as mt5_update_position_levels
+
+
+def mt5_get_open_positions(client) -> list[OpenPosition]:
+    """Fetch all currently open positions from MT5 in the unified position shape."""
+    positions = []
+    for pos in client.get_positions():
+        positions.append(
+            OpenPosition(
+                deal_id=str(pos["ticket"]),
+                epic=pos["symbol"],
+                direction=pos["type"],
+                size=float(pos["volume"]),
+                level=float(pos["price_open"]),
+                stop_level=_normalize_level(pos.get("sl")),
+                profit_level=_normalize_level(pos.get("tp")),
+                upl=float(pos["profit"]),
+                created_date="",
+            )
+        )
+    return positions
+
+
+def mt5_has_open_position(client, symbol: str) -> Optional[OpenPosition]:
+    """Check if there's an open position for a symbol in MT5."""
+    positions = mt5_get_open_positions(client)
+    for pos in positions:
+        if pos.epic == symbol:
+            return pos
+    return None
+
+
+def _adjust_mt5_market_levels(client, signal: TradeSignal) -> tuple[Optional[float], Optional[float]]:
+    """Shift signal-based SL/TP distances onto the live MT5 execution price."""
+    try:
+        symbol = Symbol(signal.symbol)
+    except ValueError:
+        logger.warning("Unknown MT5 symbol for level adjustment: %s", signal.symbol)
+        return signal.stop_loss, signal.take_profit
+
+    latest_price = client.get_latest_price(symbol)
+    if not latest_price:
+        return signal.stop_loss, signal.take_profit
+
+    if signal.signal.value == "BUY":
+        execution_price = latest_price["ask"]
+        risk_distance = max(signal.entry - signal.stop_loss, 0.0)
+        reward_distance = max(signal.take_profit - signal.entry, 0.0)
+        stop_loss = execution_price - risk_distance if risk_distance > 0 else signal.stop_loss
+        take_profit = execution_price + reward_distance if reward_distance > 0 else signal.take_profit
+    else:
+        execution_price = latest_price["bid"]
+        risk_distance = max(signal.stop_loss - signal.entry, 0.0)
+        reward_distance = max(signal.entry - signal.take_profit, 0.0)
+        stop_loss = execution_price + risk_distance if risk_distance > 0 else signal.stop_loss
+        take_profit = execution_price - reward_distance if reward_distance > 0 else signal.take_profit
+
+    logger.info(
+        "MT5 market levels adjusted for %s %s: signal entry=%.2f live=%.2f SL %.2f->%.2f TP %.2f->%.2f",
+        signal.signal.value,
+        signal.symbol,
+        signal.entry,
+        execution_price,
+        signal.stop_loss,
+        stop_loss,
+        signal.take_profit,
+        take_profit,
+    )
+    return round(stop_loss, 5), round(take_profit, 5)
+
+
+def mt5_place_trade(
+    client,
+    signal: TradeSignal,
+    size: float = 0.01,
+) -> OrderResult:
+    """Place a market order on MT5 based on a trade signal."""
+    symbol = signal.symbol
+
+    # Check for existing open position
+    existing = mt5_has_open_position(client, symbol)
+    if existing:
+        logger.warning(
+            "SKIP: already have open %s %s size=%.2f — no duplicate order",
+            existing.direction, existing.epic, existing.size,
+        )
+        return OrderResult(
+            success=False, deal_reference=None, epic=symbol,
+            direction=signal.signal.value, size=size,
+            stop_level=signal.stop_loss, profit_level=signal.take_profit,
+            error=f"Open position already exists for {symbol} (ticket={existing.deal_id})",
+        )
+
+    stop_level, profit_level = _adjust_mt5_market_levels(client, signal)
+
+    # Place the order
+    ticket = mt5_place_order(
+        symbol=symbol,
+        order_type=signal.signal.value,
+        volume=size,
+        stop_loss=stop_level,
+        take_profit=profit_level,
+        comment=f"AI {signal.signal.value} {symbol}",
+    )
+
+    if ticket:
+        logger.info("Order placed on MT5: ticket=%d", ticket)
+        return OrderResult(
+            success=True,
+            deal_reference=str(ticket),
+            epic=symbol,
+            direction=signal.signal.value,
+            size=size,
+            stop_level=stop_level,
+            profit_level=profit_level,
+        )
+    else:
+        return OrderResult(
+            success=False,
+            deal_reference=None,
+            epic=symbol,
+            direction=signal.signal.value,
+            size=size,
+            stop_level=stop_level,
+            profit_level=profit_level,
+            error="Failed to place order on MT5",
+        )
+
+
+def mt5_close_position_by_symbol(client, position: OpenPosition) -> CloseResult:
+    """Close all open MT5 positions for the same symbol as the given position."""
+    positions = mt5_get_open_positions(client)
+    closed = []
+
+    for pos in positions:
+        if pos.epic == position.epic:
+            success = mt5_close_position(int(pos.deal_id))
+            if success:
+                closed.append(pos)
+
+    if closed:
+        return CloseResult(
+            success=True,
+            deal_id=",".join(p.deal_id for p in closed),
+            epic=position.epic,
+            direction=closed[0].direction,
+            size=sum(p.size for p in closed),
+        )
+    else:
+        return CloseResult(
+            success=False,
+            deal_id="",
+            epic=position.epic,
+            direction="",
+            size=0,
+            error=f"No positions found for {position.epic}",
+        )
+
+
+def mt5_update_position_sl_tp(
+    client,
+    position: OpenPosition,
+    new_sl: Optional[float] = None,
+    new_tp: Optional[float] = None,
+) -> UpdateResult:
+    """Update the stop loss and/or take profit of an MT5 position."""
+    if new_sl is None and new_tp is None:
+        return UpdateResult(
+            success=False,
+            deal_id=position.deal_id,
+            epic=position.epic,
+            direction=position.direction,
+            error="No new SL or TP provided",
+        )
+
+    try:
+        ticket = int(position.deal_id)
+    except ValueError:
+        return UpdateResult(
+            success=False,
+            deal_id=position.deal_id,
+            epic=position.epic,
+            direction=position.direction,
+            error=f"Invalid MT5 ticket: {position.deal_id}",
+        )
+
+    success = mt5_update_position_levels(ticket, new_sl=new_sl, new_tp=new_tp)
+    if not success:
+        return UpdateResult(
+            success=False,
+            deal_id=position.deal_id,
+            epic=position.epic,
+            direction=position.direction,
+            error="Failed to update position on MT5",
+        )
+
+    return UpdateResult(
+        success=True,
+        deal_id=position.deal_id,
+        epic=position.epic,
+        direction=position.direction,
+        old_sl=position.stop_level,
+        new_sl=new_sl,
+        old_tp=position.profit_level,
+        new_tp=new_tp,
+    )
+
+
+def get_trailing_stop_candidate(
+    position: OpenPosition,
+    price_data: dict,
+) -> tuple[Optional[float], Optional[str]]:
+    """Return the next profit-locking SL level based on TP milestones.
+
+    Rules:
+    - When price reaches 1/3 of the TP distance, move SL to lock 1/3 profit.
+    - When price reaches 1/2 of the TP distance, move SL to lock 1/2 profit.
+    - After that, keep the SL unchanged.
+    """
+    if position.profit_level is None:
+        return None, None
+
+    direction = position.direction.upper()
+    if direction == "BUY":
+        current_price = price_data.get("bid") or price_data.get("ask")
+        full_profit_distance = position.profit_level - position.level
+        gained_distance = (current_price - position.level) if current_price is not None else None
+    elif direction == "SELL":
+        current_price = price_data.get("ask") or price_data.get("bid")
+        full_profit_distance = position.level - position.profit_level
+        gained_distance = (position.level - current_price) if current_price is not None else None
+    else:
+        return None, None
+
+    if current_price is None or full_profit_distance <= 0 or gained_distance is None or gained_distance <= 0:
+        return None, None
+
+    checkpoints = (
+        (0.5, "1/2"),
+        (1 / 3, "1/3"),
+    )
+    for ratio, label in checkpoints:
+        if gained_distance < full_profit_distance * ratio:
+            continue
+
+        target_sl = position.level + (full_profit_distance * ratio)
+        if direction == "SELL":
+            target_sl = position.level - (full_profit_distance * ratio)
+
+        current_sl = position.stop_level
+        if current_sl is not None:
+            if direction == "BUY" and target_sl <= current_sl:
+                return None, None
+            if direction == "SELL" and target_sl >= current_sl:
+                return None, None
+
+        return round(target_sl, 5), label
+
+    return None, None
+
+
+def mt5_check_timeouts(client) -> list[CloseResult]:
+    """Check all open MT5 positions and close any that have exceeded max hold time."""
+    max_hold_minutes = SETTINGS.get_max_hold_minutes()
+    positions = client.get_positions()
+
+    if not positions:
+        return []
+
+    results = []
+    now = datetime.now(timezone.utc)
+
+    for pos in positions:
+        # MT5 doesn't provide open time in positions_get(), need to get order info
+        # For now, skip timeout check for MT5 or use a different approach
+        logger.debug("MT5 timeout check not yet implemented for ticket %s", pos["ticket"])
+
+    return results
+
+
+# ==================== UNIFIED INTERFACE ====================
+
+def get_open_positions_unified(client) -> list:
+    """Get open positions for the current platform."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_get_open_positions(client)
+    else:
+        return get_open_positions(client)
+
+
+def has_open_position_unified(client, epic_or_symbol: str):
+    """Check if there's an open position for a symbol."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_has_open_position(client, epic_or_symbol)
+    else:
+        return has_open_position(client, epic_or_symbol)
+
+
+def place_trade_unified(
+    client,
+    signal: TradeSignal,
+    size: float = 0.01,
+) -> OrderResult:
+    """Place a trade for the current platform."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_place_trade(client, signal, size)
+    else:
+        return place_trade(client, signal, size)
+
+
+def close_position_unified(client, position) -> CloseResult:
+    """Close a position for the current platform."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_close_position_by_symbol(client, position)
+    else:
+        return close_position(client, position)
+
+
+def update_position_sl_tp_unified(
+    client,
+    position,
+    new_sl: Optional[float] = None,
+    new_tp: Optional[float] = None,
+) -> UpdateResult:
+    """Update a position's SL/TP for the current platform."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_update_position_sl_tp(client, position, new_sl=new_sl, new_tp=new_tp)
+    return update_position_sl_tp(client, position, new_sl=new_sl, new_tp=new_tp)
+
+
+def check_timeouts_unified(client) -> list[CloseResult]:
+    """Check position timeouts for the current platform."""
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        return mt5_check_timeouts(client)
+    else:
+        return check_timeouts(client)

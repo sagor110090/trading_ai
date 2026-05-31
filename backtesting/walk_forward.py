@@ -90,6 +90,9 @@ def generate_walk_forward_folds(
 
     df = df.sort_values("timestamp").reset_index(drop=True)
 
+    # Convert timestamp strings to datetime objects
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
     # Determine time range
     start_date = df["timestamp"].min()
     end_date = df["timestamp"].max()

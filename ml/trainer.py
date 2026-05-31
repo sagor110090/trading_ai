@@ -246,6 +246,23 @@ def _get_next_version(symbol: str, timeframe: Optional[str], model_type: str) ->
             .first()
         )
         version = (latest.version + 1) if latest else 1
+
+        # Check if this version already exists (race condition or import)
+        existing = session.query(MLModelMeta).filter(
+            MLModelMeta.model_type == model_type,
+            MLModelMeta.symbol == symbol,
+            MLModelMeta.timeframe == timeframe,
+            MLModelMeta.version == version,
+        ).first()
+        if existing:
+            # Find the next available version
+            version = session.query(MLModelMeta.version).filter(
+                MLModelMeta.model_type == model_type,
+                MLModelMeta.symbol == symbol,
+                MLModelMeta.timeframe == timeframe,
+            ).order_by(MLModelMeta.version.desc()).first()
+            version = (version[0] + 1) if version else 1
+
         return version
     except Exception:
         return 1
@@ -272,21 +289,43 @@ def _store_model_meta(
             MLModelMeta.is_active == True,
         ).update({"is_active": False})
 
-        meta = MLModelMeta(
-            model_type=model_type,
-            symbol=symbol,
-            timeframe=timeframe,
-            version=version,
-            filepath=filepath,
-            accuracy=metrics.accuracy,
-            precision=metrics.precision,
-            recall=metrics.recall,
-            f1=metrics.f1,
-            roc_auc=metrics.roc_auc,
-            train_signal_count=train_signal_count,
-            is_active=True,
-        )
-        session.add(meta)
+        # Check if this version already exists (from import)
+        existing = session.query(MLModelMeta).filter(
+            MLModelMeta.model_type == model_type,
+            MLModelMeta.symbol == symbol,
+            MLModelMeta.timeframe == timeframe,
+            MLModelMeta.version == version,
+        ).first()
+
+        if existing:
+            # Update existing record
+            from datetime import datetime
+            existing.filepath = filepath
+            existing.accuracy = metrics.accuracy
+            existing.precision = metrics.precision
+            existing.recall = metrics.recall
+            existing.f1 = metrics.f1
+            existing.roc_auc = metrics.roc_auc
+            existing.train_signal_count = train_signal_count
+            existing.trained_at = datetime.utcnow()
+            existing.is_active = True
+        else:
+            # Insert new record
+            meta = MLModelMeta(
+                model_type=model_type,
+                symbol=symbol,
+                timeframe=timeframe,
+                version=version,
+                filepath=filepath,
+                accuracy=metrics.accuracy,
+                precision=metrics.precision,
+                recall=metrics.recall,
+                f1=metrics.f1,
+                roc_auc=metrics.roc_auc,
+                train_signal_count=train_signal_count,
+                is_active=True,
+            )
+            session.add(meta)
         session.commit()
     except Exception:
         session.rollback()

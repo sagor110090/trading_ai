@@ -44,6 +44,11 @@ class TradeMode(str, Enum):
     SWING = "swing"
 
 
+class TradingPlatform(str, Enum):
+    CAPITAL = "CAPITAL"
+    MT5 = "MT5"
+
+
 @dataclass(frozen=True)
 class CapitalComConfig:
     api_key: str = ""
@@ -56,6 +61,14 @@ class CapitalComConfig:
     @property
     def active_url(self) -> str:
         return self.demo_url if self.use_demo else self.base_url
+
+
+@dataclass(frozen=True)
+class MT5Config:
+    login: int = 0
+    password: str = ""
+    server: str = ""
+    timeout: int = 60000  # Connection timeout in milliseconds
 
 
 @dataclass(frozen=True)
@@ -198,6 +211,8 @@ class VerificationConfig:
 @dataclass(frozen=True)
 class Settings:
     capital_com: CapitalComConfig = field(default_factory=CapitalComConfig)
+    mt5: MT5Config = field(default_factory=MT5Config)
+    trading_platform: TradingPlatform = TradingPlatform.CAPITAL
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     signal_weights: SignalWeights = field(default_factory=SignalWeights)
     signal_thresholds: SignalThresholds = field(default_factory=SignalThresholds)
@@ -209,6 +224,7 @@ class Settings:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
+    trailing_stop_enabled: bool = True
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
 
     def get_trade_size(self, symbol: str) -> float:
@@ -261,6 +277,18 @@ def load_settings() -> Settings:
         demo_url=os.getenv("CAPITAL_DEMO_URL", CapitalComConfig.demo_url),
     )
 
+    # MT5
+    mt5_cfg = MT5Config(
+        login=int(os.getenv("MT5_LOGIN", "0")),
+        password=os.getenv("MT5_PASSWORD", ""),
+        server=os.getenv("MT5_SERVER", ""),
+    )
+
+    # Trading platform
+    platform_str = os.getenv("TRADING_PLATFORM", "CAPITAL").upper()
+    platform_map = {"CAPITAL": TradingPlatform.CAPITAL, "MT5": TradingPlatform.MT5}
+    trading_platform = platform_map.get(platform_str, TradingPlatform.CAPITAL)
+
     # Trade mode
     mode_str = os.getenv("TRADE_MODE", "swing").lower()
     mode_map = {"scalping": TradeMode.SCALPING, "day_trading": TradeMode.DAY_TRADING, "swing": TradeMode.SWING}
@@ -274,6 +302,7 @@ def load_settings() -> Settings:
         symbols = (Symbol.BTCUSD,)
 
     auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
+    trailing_stop_enabled = os.getenv("TRAILING_STOP_ENABLED", "true").lower() == "true"
 
     # Read all TRADE_SIZE_<SYMBOL> from env
     trade_sizes = {"DEFAULT": float(os.getenv("TRADE_SIZE_DEFAULT", "0.01"))}
@@ -291,10 +320,13 @@ def load_settings() -> Settings:
 
     return Settings(
         capital_com=cap_cfg,
+        mt5=mt5_cfg,
+        trading_platform=trading_platform,
         database=db_cfg,
         ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
+        trailing_stop_enabled=trailing_stop_enabled,
         trade_sizes=trade_sizes,
         symbols=symbols,
         log_level=os.getenv("LOG_LEVEL", "INFO"),

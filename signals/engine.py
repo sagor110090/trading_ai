@@ -135,6 +135,7 @@ def generate_signal_scalping(
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     symbol: Symbol,
+    live_price: Optional[float] = None,
 ) -> Optional[TradeSignal]:
     """Scalping signal: M5 entry in direction of H1 trend.
 
@@ -143,6 +144,10 @@ def generate_signal_scalping(
     - M5 momentum must agree for entry timing
     - Tight stops: 0.5x ATR SL, 0.8x ATR TP
     - Lower threshold (30%) — more signals, quick in/out
+
+    Args:
+        live_price: Current market price. If provided, used as entry instead
+            of the last H1 candle close, so SL/TP reflect live conditions.
     """
     cfg = SETTINGS.scalping
 
@@ -182,7 +187,7 @@ def generate_signal_scalping(
         logger.info("Scalping: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
         return None
 
-    entry = round(h1_close, 5)
+    entry = round(live_price if live_price is not None else h1_close, 5)
     stop_loss, take_profit = _compute_stop_take(
         h1_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
     )
@@ -214,6 +219,7 @@ def generate_signal_day_trading(
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     symbol: Symbol,
+    live_price: Optional[float] = None,
 ) -> Optional[TradeSignal]:
     """Day trading signal: M5 entry in H1 trend direction, H4 must not contradict.
 
@@ -279,7 +285,7 @@ def generate_signal_day_trading(
         logger.info("Day trade: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
         return None
 
-    entry = round(h1_close, 5)
+    entry = round(live_price if live_price is not None else h1_close, 5)
     stop_loss, take_profit = _compute_stop_take(
         h1_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
     )
@@ -311,6 +317,7 @@ def generate_signal_swing(
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     symbol: Symbol,
+    live_price: Optional[float] = None,
 ) -> Optional[TradeSignal]:
     """Swing signal: H4+H1 must agree, M5 entry trigger.
 
@@ -371,7 +378,7 @@ def generate_signal_swing(
         logger.info("Swing: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
         return None
 
-    entry = round(h1_close, 5)
+    entry = round(live_price if live_price is not None else h1_close, 5)
     stop_loss, take_profit = _compute_stop_take(
         signal_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
     )
@@ -404,17 +411,23 @@ def generate_signal(
     df_m5: pd.DataFrame,
     symbol: Symbol,
     mode: Optional[TradeMode] = None,
+    live_price: Optional[float] = None,
 ) -> Optional[TradeSignal]:
-    """Generate signal based on the active trade mode."""
+    """Generate signal based on the active trade mode.
+
+    Args:
+        live_price: Current market price. If provided, used as entry instead
+            of the last candle close, so SL/TP reflect live conditions.
+    """
     if mode is None:
         mode = SETTINGS.trade_mode
 
     if mode == TradeMode.SCALPING:
-        return generate_signal_scalping(df_h1, df_m5, symbol)
+        return generate_signal_scalping(df_h1, df_m5, symbol, live_price=live_price)
     elif mode == TradeMode.DAY_TRADING:
-        return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol)
+        return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol, live_price=live_price)
     elif mode == TradeMode.SWING:
-        return generate_signal_swing(df_h4, df_h1, df_m5, symbol)
+        return generate_signal_swing(df_h4, df_h1, df_m5, symbol, live_price=live_price)
     else:
         logger.error("Unknown trade mode: %s", mode)
         return None

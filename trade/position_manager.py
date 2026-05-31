@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from trading_ai.config.settings import SETTINGS, Symbol, TradeMode
+from trading_ai.config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
 from trading_ai.data.collector import CapitalComClient
 from trading_ai.data.database import get_session
 from trading_ai.data.models import Signal, SignalVerification
@@ -32,6 +32,10 @@ from trading_ai.trade.executor import (
     get_open_positions,
     should_update_sl,
     update_position_sl_tp,
+    get_open_positions_unified,
+    has_open_position_unified,
+    place_trade_unified,
+    close_position_unified,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,9 +104,9 @@ class PositionManager:
 
     # ── Sync with broker ──────────────────────────────────────────────────
 
-    def sync_positions(self) -> list[OpenPosition]:
-        """Fetch open positions from Capital.com."""
-        self._broker_positions = get_open_positions(self.client)
+    def sync_positions(self) -> list:
+        """Fetch open positions from the trading platform."""
+        self._broker_positions = get_open_positions_unified(self.client)
         return self._broker_positions
 
     # ── Signal dedup ──────────────────────────────────────────────────────
@@ -234,7 +238,7 @@ class PositionManager:
             closed_position: Optional[str]  # if we reversed
             sl_updated: bool  # if we updated SL
         """
-        from trading_ai.trade.executor import place_trade
+        from trading_ai.trade.executor import place_trade_unified
 
         result = {
             "success": False,
@@ -251,6 +255,12 @@ class PositionManager:
 
         if decision.action == "update_sl_tp":
             # Same direction — update SL and TP on the existing position
+            # Note: SL/TP updates only supported on Capital.com currently
+            if SETTINGS.trading_platform == TradingPlatform.MT5:
+                result["success"] = True
+                result["reason"] = "SL/TP updates not supported on MT5 yet"
+                return result
+
             pos = decision.existing_position
             new_sl = decision.new_sl
             new_tp = decision.new_tp
@@ -303,7 +313,7 @@ class PositionManager:
                 "Reversing position: closing %s %s (deal %s) to take opposite trade",
                 pos.direction, pos.epic, pos.deal_id,
             )
-            close_result = close_position(self.client, pos)
+            close_result = close_position_unified(self.client, pos)
             if not close_result.success:
                 logger.error("Failed to close position %s: %s", pos.deal_id, close_result.error)
                 result["reason"] = f"Failed to close existing position: {close_result.error}"
@@ -318,7 +328,7 @@ class PositionManager:
         if decision.action in ("place", "reverse_and_place"):
             # Place the new trade
             size = SETTINGS.get_trade_size(trade_signal.symbol)
-            order_result = place_trade(self.client, trade_signal, size=size)
+            order_result = place_trade_unified(self.client, trade_signal, size=size)
 
             if order_result.success:
                 result["success"] = True
@@ -388,7 +398,9 @@ class PositionManager:
 
     @staticmethod
     def _get_epic(symbol: str) -> Optional[str]:
-        """Get the Capital.com epic for a symbol."""
+        """Get the broker symbol identifier for the active platform."""
+        if SETTINGS.trading_platform == TradingPlatform.MT5:
+            return symbol
         from trading_ai.data.collector import _EPIC_MAP
         try:
             symbol_enum = Symbol(symbol)

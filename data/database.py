@@ -1,6 +1,7 @@
-"""Database session management and table creation."""
+"""Database session management and table creation with SQLite support."""
 
 import logging
+import os
 from typing import Generator
 
 from sqlalchemy import create_engine
@@ -18,19 +19,30 @@ _session_factory = None
 def get_engine():
     global _engine
     if _engine is None:
-        cfg = SETTINGS.database
-        url = (
-            f"mysql+pymysql://{cfg.username}:{cfg.password}"
-            f"@127.0.0.1:{cfg.port}/{cfg.database}?charset=utf8mb4"
-        )
+        # Check if we should use SQLite (via USE_SQLITE env var)
+        use_sqlite = os.getenv("USE_SQLITE", "true").lower() == "true"
+
+        if use_sqlite:
+            # Use SQLite
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            db_path = os.getenv("SQLITE_DB_PATH", os.path.join(project_root, "trading_ai.db"))
+            url = f"sqlite:///{db_path}"
+            logger.info(f"Using SQLite database: {db_path}")
+        else:
+            # Use MySQL
+            cfg = SETTINGS.database
+            url = (
+                f"mysql+pymysql://{cfg.username}:{cfg.password}"
+                f"@127.0.0.1:{cfg.port}/{cfg.database}?charset=utf8mb4"
+            )
+            logger.info(f"Using MySQL database: {cfg.host}:{cfg.port}/{cfg.database}")
+
         _engine = create_engine(
             url,
-            pool_size=cfg.pool_size,
-            max_overflow=cfg.max_overflow,
             pool_pre_ping=True,
-            pool_recycle=3600,
+            echo=False,
         )
-        logger.info("Database engine created: %s:%d/%s", cfg.host, cfg.port, cfg.database)
+        logger.info("Database engine created")
     return _engine
 
 
