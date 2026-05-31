@@ -4,9 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-import pandas as pd
-
-from trading_ai.config.settings import SETTINGS, SignalResult, SignalType
+from trading_ai.config.settings import SETTINGS, SignalResult, SignalType, Timeframe
 from trading_ai.data.database import get_session
 from trading_ai.data.models import Candle, Signal, SignalVerification
 
@@ -59,11 +57,11 @@ def verify_signal(
         holding_candles = i + 1
 
         if direction == SignalType.BUY:
-            # Check stop loss hit (low touches or goes below SL)
+            # Stop loss hit
             if candle.low <= sl:
                 mfe = max_favorable
-                mae = entry - candle.low  # adverse in price units
-                profit = sl - entry  # negative
+                mae = entry - candle.low
+                profit = sl - entry
                 rr = abs(profit) / abs(tp - entry) if abs(tp - entry) > 0 else 0.0
                 return VerificationResult(
                     signal_id=signal.signal_id,
@@ -75,7 +73,7 @@ def verify_signal(
                     max_adverse_excursion=round(mae, 5),
                 )
 
-            # Check take profit hit (high touches or goes above TP)
+            # Take profit hit
             if candle.high >= tp:
                 mfe = candle.high - entry
                 mae = max_adverse
@@ -91,18 +89,17 @@ def verify_signal(
                     max_adverse_excursion=round(mae, 5),
                 )
 
-            # Track MFE/MAE
             favorable = candle.high - entry
             adverse = entry - candle.low
             max_favorable = max(max_favorable, favorable)
             max_adverse = max(max_adverse, adverse)
 
         elif direction == SignalType.SELL:
-            # Check stop loss hit (high touches or goes above SL)
+            # Stop loss hit
             if candle.high >= sl:
                 mfe = max_favorable
                 mae = candle.high - entry
-                profit = entry - sl  # negative
+                profit = entry - sl
                 rr = abs(profit) / abs(entry - tp) if abs(entry - tp) > 0 else 0.0
                 return VerificationResult(
                     signal_id=signal.signal_id,
@@ -114,7 +111,7 @@ def verify_signal(
                     max_adverse_excursion=round(mae, 5),
                 )
 
-            # Check take profit hit (low touches or goes below TP)
+            # Take profit hit
             if candle.low <= tp:
                 mfe = entry - candle.low
                 mae = max_adverse
@@ -130,7 +127,6 @@ def verify_signal(
                     max_adverse_excursion=round(mae, 5),
                 )
 
-            # Track MFE/MAE
             favorable = entry - candle.low
             adverse = candle.high - entry
             max_favorable = max(max_favorable, favorable)
@@ -138,7 +134,6 @@ def verify_signal(
 
     # Exhausted lookahead candles without SL/TP hit
     if holding_candles >= VERIFICATION_CONFIG.lookahead_candles:
-        # Determine breakeven vs loss by final position
         last_close = candles_after[-1].close
         if direction == SignalType.BUY:
             unrealized = last_close - entry
@@ -162,33 +157,16 @@ def verify_signal(
             max_adverse_excursion=round(max_adverse, 5),
         )
 
-    # Not yet resolved
     return None
 
 
-def store_verification(result: VerificationResult, signal_db_id: int) -> None:
-    """Persist a verification result to the database."""
-    session_gen = get_session()
-    session = next(session_gen)
-    try:
-        verification = SignalVerification(
-            signal_id=signal_db_id,
-            result=result.result,
-            profit_points=result.profit_points,
-            risk_reward=result.risk_reward,
-            holding_candles=result.holding_candles,
-            max_favorable_excursion=result.max_favorable_excursion,
-            max_adverse_excursion=result.max_adverse_excursion,
-        )
-        session.add(verification)
-        logger.info("Stored verification for signal %s: %s", result.signal_id, result.result.value)
-    except Exception:
-        session.rollback()
-        raise
+def verify_pending_signals(symbol: str) -> int:
+    """Verify all pending signals for a symbol using M5 candles.
 
+    Uses M5 (5-minute) candles for all signals regardless of mode, because
+    M5 gives the finest granularity to check SL/TP hits accurately.
 
-def verify_pending_signals(symbol: str, timeframe: str, recent_candles: list[Candle]) -> int:
-    """Verify all pending signals for a symbol/timeframe that have enough subsequent data.
+    Uses a single database session for all operations to ensure atomicity.
 
     Returns the number of signals newly verified.
     """
@@ -197,31 +175,68 @@ def verify_pending_signals(symbol: str, timeframe: str, recent_candles: list[Can
     verified_count = 0
 
     try:
+        # Get all unverified signals for this symbol
         pending_signals = (
             session.query(Signal)
             .outerjoin(SignalVerification, Signal.id == SignalVerification.signal_id)
             .filter(
                 Signal.symbol == symbol,
-                Signal.timeframe == timeframe,
                 SignalVerification.id.is_(None),
             )
             .order_by(Signal.timestamp)
             .all()
         )
 
+        if not pending_signals:
+            return 0
+
+        # Get M5 candles for verification — finest granularity
+        m5_candles = (
+            session.query(Candle)
+            .filter(
+                Candle.symbol == symbol,
+                Candle.timeframe == Timeframe.M5.value,
+            )
+            .order_by(Candle.timestamp)
+            .all()
+        )
+
+        logger.info(
+            "Verifying %d pending signals for %s using %d M5 candles",
+            len(pending_signals), symbol, len(m5_candles),
+        )
+
         for sig in pending_signals:
-            # Get candles after signal timestamp
+            # Get M5 candles after signal timestamp
             sig_candles = [
-                c for c in recent_candles
+                c for c in m5_candles
                 if c.timestamp > sig.timestamp
             ]
 
-            if len(sig_candles) < VERIFICATION_CONFIG.lookahead_candles:
+            # Need at least min_lookahead_candles to attempt verification.
+            # If SL/TP is hit within fewer candles, we verify immediately.
+            # Only need full lookahead_candles for the BREAKEVEN/expired case.
+            if len(sig_candles) < VERIFICATION_CONFIG.min_lookahead_candles:
+                logger.debug(
+                    "Signal %s: only %d candles after signal (need min %d)",
+                    sig.signal_id, len(sig_candles), VERIFICATION_CONFIG.min_lookahead_candles,
+                )
                 continue
 
-            result = verify_signal(sig, sig_candles[:VERIFICATION_CONFIG.lookahead_candles])
+            # Check up to min(available candles, lookahead_candles)
+            candles_to_check = sig_candles[:VERIFICATION_CONFIG.lookahead_candles]
+            result = verify_signal(sig, candles_to_check)
             if result:
-                store_verification(result, sig.id)
+                verification = SignalVerification(
+                    signal_id=sig.id,
+                    result=result.result,
+                    profit_points=result.profit_points,
+                    risk_reward=result.risk_reward,
+                    holding_candles=result.holding_candles,
+                    max_favorable_excursion=result.max_favorable_excursion,
+                    max_adverse_excursion=result.max_adverse_excursion,
+                )
+                session.add(verification)
                 verified_count += 1
                 logger.info(
                     "Verified signal %s: %s profit=%.5f",
@@ -232,6 +247,8 @@ def verify_pending_signals(symbol: str, timeframe: str, recent_candles: list[Can
     except Exception:
         session.rollback()
         raise
+    finally:
+        session.close()
 
-    logger.info("Verified %d pending signals for %s %s", verified_count, symbol, timeframe)
+    logger.info("Verified %d/%d pending signals for %s", verified_count, len(pending_signals), symbol)
     return verified_count

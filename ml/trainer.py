@@ -131,18 +131,19 @@ _TRAINERS = {
 
 def train_models(
     symbol: str,
-    timeframe: str,
+    timeframe: Optional[str],
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_val: pd.DataFrame,
     y_val: pd.Series,
     model_types: Optional[list[str]] = None,
+    train_signal_count: Optional[int] = None,
 ) -> list[TrainingResult]:
     """Train all specified model types and save to disk.
 
     Args:
         symbol: Trading symbol (e.g., "XAUUSD").
-        timeframe: Candle timeframe (e.g., "H1").
+        timeframe: Candle timeframe (e.g., "H1") or None for all-timeframe model.
         X_train, y_train: Training features and labels.
         X_val, y_val: Validation features and labels.
         model_types: List of model types to train. Defaults to all.
@@ -155,6 +156,9 @@ def train_models(
     if model_types is None:
         model_types = list(_TRAINERS.keys())
 
+    # Use "all" as label when no specific timeframe
+    tf_label = timeframe or "all"
+
     results = []
 
     for model_type in model_types:
@@ -163,7 +167,7 @@ def train_models(
             logger.warning("Unknown model type: %s", model_type)
             continue
 
-        logger.info("Training %s for %s %s...", model_type, symbol, timeframe)
+        logger.info("Training %s for %s %s...", model_type, symbol, tf_label)
 
         try:
             result = trainer(X_train, y_train, X_val, y_val)
@@ -175,10 +179,10 @@ def train_models(
         metrics = result["metrics"]
 
         # Determine version
-        version = _get_next_version(symbol, timeframe, model_type)
+        version = _get_next_version(symbol, tf_label, model_type)
 
         # Save model to disk
-        filename = f"{model_type}_{symbol}_{timeframe}_v{version}.joblib"
+        filename = f"{model_type}_{symbol}_{tf_label}_v{version}.joblib"
         filepath = os.path.join(MODEL_DIR, filename)
         joblib.dump(model, filepath)
         logger.info("Saved %s model to %s", model_type, filepath)
@@ -190,13 +194,22 @@ def train_models(
 
         # Store metadata in database (non-fatal if DB unavailable)
         try:
+            # Replace NaN metrics with 0 — MySQL can't store NaN
+            safe_metrics = ModelMetrics(
+                accuracy=metrics.accuracy if not np.isnan(metrics.accuracy) else 0.0,
+                precision=metrics.precision if not np.isnan(metrics.precision) else 0.0,
+                recall=metrics.recall if not np.isnan(metrics.recall) else 0.0,
+                f1=metrics.f1 if not np.isnan(metrics.f1) else 0.0,
+                roc_auc=metrics.roc_auc if not np.isnan(metrics.roc_auc) else 0.0,
+            )
             _store_model_meta(
                 model_type=model_type,
                 symbol=symbol,
-                timeframe=timeframe,
+                timeframe=tf_label,
                 version=version,
                 filepath=filepath,
-                metrics=metrics,
+                metrics=safe_metrics,
+                train_signal_count=train_signal_count,
             )
         except Exception as e:
             logger.warning("Failed to store model metadata in DB: %s", e)
@@ -217,7 +230,7 @@ def train_models(
     return results
 
 
-def _get_next_version(symbol: str, timeframe: str, model_type: str) -> int:
+def _get_next_version(symbol: str, timeframe: Optional[str], model_type: str) -> int:
     """Get the next version number for a model type."""
     try:
         session_gen = get_session()
@@ -241,10 +254,11 @@ def _get_next_version(symbol: str, timeframe: str, model_type: str) -> int:
 def _store_model_meta(
     model_type: str,
     symbol: str,
-    timeframe: str,
+    timeframe: Optional[str],
     version: int,
     filepath: str,
     metrics: ModelMetrics,
+    train_signal_count: Optional[int] = None,
 ) -> None:
     """Store model metadata in the database."""
     session_gen = get_session()
@@ -269,6 +283,7 @@ def _store_model_meta(
             recall=metrics.recall,
             f1=metrics.f1,
             roc_auc=metrics.roc_auc,
+            train_signal_count=train_signal_count,
             is_active=True,
         )
         session.add(meta)

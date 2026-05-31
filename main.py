@@ -5,25 +5,55 @@ import sys
 from typing import Optional
 
 import pandas as pd
+from rich.logging import RichHandler
 
 from trading_ai.config.settings import SETTINGS, Symbol, Timeframe
 from trading_ai.data.collector import CapitalComClient
 from trading_ai.data.database import create_tables, get_session
 from trading_ai.data.models import Candle, Signal
+from trading_ai.display import (
+    console,
+    display_auto_train_result,
+    display_auto_train_skipped,
+    display_auto_train_starting,
+    display_auto_train_waiting,
+    display_candle_fetch,
+    display_cycle_header,
+    display_cycle_summary,
+    display_ml_prediction,
+    display_no_ml_model,
+    display_no_signal,
+    display_signal,
+    display_trade_blocked,
+    display_trade_failed,
+    display_trade_placed,
+    display_trade_skipped_existing,
+    display_verification_summary,
+)
 from trading_ai.indicators.features import compute_all_features
-from trading_ai.signals.engine import TradeSignal, generate_signal
 from trading_ai.ml.predictor import Prediction, predict_signal
+from trading_ai.signals.engine import TradeSignal, generate_signal
 from trading_ai.verification.verifier import verify_pending_signals
 
 logger = logging.getLogger(__name__)
 
 
 def _setup_logging() -> None:
+    """Configure logging with Rich handler for beautiful output.
+
+    Submodule logs at INFO level are suppressed — only WARNING and above
+    appear in the console. The display module handles all INFO-level output.
+    """
+    # Rich handler for the root logger (catches WARNING+ from submodules)
     logging.basicConfig(
-        level=SETTINGS.log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        level="WARNING",
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
+
+    # Set __main__ logger to DEBUG so display-level info still works if needed
+    logging.getLogger(__name__).setLevel(logging.DEBUG)
 
 
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
@@ -117,7 +147,6 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
         session.rollback()
         raise
 
-    logger.info("Stored signal %s to database", trade_signal.signal_id)
     return signal
 
 
@@ -150,30 +179,30 @@ def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.D
     return pd.DataFrame(rows)
 
 
-def _get_recent_candles_for_verification(symbol: str, timeframe: str, limit: int = 100) -> list:
-    """Load recent candles as ORM objects for verification."""
-    session_gen = get_session()
-    session = next(session_gen)
-
-    candles = (
-        session.query(Candle)
-        .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
-        .order_by(Candle.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-
-    return list(reversed(candles))
-
-
 def run_signal_cycle(client: CapitalComClient) -> None:
     """One complete cycle: fetch data for all timeframes, run confluence, verify, predict."""
     for symbol in SETTINGS.symbols:
-        logger.info("=== Processing %s ===", symbol.value)
+        display_cycle_header(symbol.value)
+
+        # Track cycle results for summary
+        stats = {
+            "signal_generated": False,
+            "ml_prediction": None,
+            "ml_blocked": False,
+            "ml_approved": False,
+            "no_ml": False,
+            "trade_placed": False,
+            "trade_blocked": False,
+            "trade_skipped": False,
+            "trade_failed": False,
+            "verified": 0,
+            "auto_train_started": False,
+        }
 
         fetched: dict[str, pd.DataFrame] = {}
 
-        # 1. Fetch and store candles for all timeframes
+        # ── 1. Fetch and store candles ──────────────────────────────────
+        candle_results: dict[str, int] = {}
         for timeframe in SETTINGS.timeframes:
             try:
                 df = client.fetch_candles(symbol, timeframe, limit=500)
@@ -182,102 +211,114 @@ def run_signal_cycle(client: CapitalComClient) -> None:
                 continue
 
             if df.empty:
-                logger.warning("No candle data for %s %s", symbol.value, timeframe.value)
                 continue
 
             new_count = _store_candles(df, symbol.value, timeframe.value)
-            logger.info("Stored %d new candles for %s %s", new_count, symbol.value, timeframe.value)
-
+            candle_results[timeframe.value] = new_count
             fetched[timeframe.value] = _load_candles_from_db(symbol.value, timeframe.value, limit=500)
 
-        # 2. Verify pending signals
-        for timeframe in SETTINGS.timeframes:
-            recent = _get_recent_candles_for_verification(symbol.value, timeframe.value)
-            if recent:
-                verified = verify_pending_signals(symbol.value, timeframe.value, recent)
-                if verified:
-                    logger.info("Verified %d signals for %s %s", verified, symbol.value, timeframe.value)
+        display_candle_fetch(candle_results)
 
-        # 3. Multi-timeframe confluence signal
+        # ── 2. Verify pending signals ────────────────────────────────────
+        verified = verify_pending_signals(symbol.value)
+        pending_count = (
+            get_session()
+            .__next__()
+            .query(Signal)
+            .outerjoin(Signal.verification)
+            .filter(Signal.symbol == symbol.value, Signal.verification == None)
+            .count()
+        )
+        display_verification_summary(verified, pending_count)
+        stats["verified"] = verified
+
+        # ── 3. Multi-timeframe confluence signal ────────────────────────
         df_h4 = fetched.get(Timeframe.H4.value, pd.DataFrame())
         df_h1 = fetched.get(Timeframe.H1.value, pd.DataFrame())
         df_m5 = fetched.get(Timeframe.M5.value, pd.DataFrame())
 
         if not df_h4.empty and not df_h1.empty:
-            mode = SETTINGS.trade_mode
-            logger.info("Running %s signal for %s (H4=%d H1=%d M5=%d)",
-                        mode.value, symbol.value, len(df_h4), len(df_h1), len(df_m5))
-
-            trade_signal = generate_signal(df_h4, df_h1, df_m5, symbol, mode)
+            trade_signal = generate_signal(df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode)
 
             if trade_signal:
                 _store_signal(trade_signal)
+                display_signal(trade_signal)
+                stats["signal_generated"] = True
+                stats["signal"] = trade_signal
 
+                # ── ML prediction ──────────────────────────────────────
+                should_trade = True
                 prediction = predict_signal(trade_signal)
                 if prediction:
-                    logger.info(
-                        "ML: %s prob=%.4f ml_conf=%.2f model=%s_v%d [%s]",
-                        prediction.signal, prediction.probability, prediction.confidence,
-                        prediction.model_type, prediction.model_version,
-                        trade_signal.confluence,
-                    )
+                    stats["ml_prediction"] = prediction
+                    if prediction.probability < SETTINGS.ml.prediction_threshold:
+                        should_trade = False
+                        stats["ml_blocked"] = True
+                        display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=True)
+                    else:
+                        stats["ml_approved"] = True
+                        display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=False)
                 else:
-                    logger.info(
-                        "Signal: %s %s confidence=%.2f entry=%.5f SL=%.5f TP=%.5f [%s]",
-                        trade_signal.trade_mode, trade_signal.signal.value, trade_signal.confidence,
-                        trade_signal.entry, trade_signal.stop_loss, trade_signal.take_profit,
-                        trade_signal.confluence,
-                    )
+                    stats["no_ml"] = True
+                    display_no_ml_model()
 
-                # Auto-trade: place order on Capital.com if enabled
-                if SETTINGS.auto_trade:
-                    _execute_trade(client, trade_signal)
+                # ── Auto-trade ──────────────────────────────────────────
+                if SETTINGS.auto_trade and should_trade:
+                    _execute_trade(client, trade_signal, stats)
+                elif SETTINGS.auto_trade and not should_trade:
+                    display_trade_blocked("ML filter")
+                    stats["trade_blocked"] = True
+
             else:
-                logger.info("No confluence signal for %s this cycle", symbol.value)
+                display_no_signal(symbol.value)
         else:
             logger.warning("Missing H4 or H1 data for confluence check on %s", symbol.value)
 
-        # 4. Auto-trade if enabled
-        # (handled above inside signal block)
+        # ── 4. Auto-train ───────────────────────────────────────────────
+        _try_auto_train(symbol.value, stats)
 
-        # 5. Auto-train if enough verified signals
-        _try_auto_train(symbol.value)
+        # ── Cycle summary ───────────────────────────────────────────────
+        display_cycle_summary(stats)
 
 
-def _execute_trade(client: CapitalComClient, trade_signal: TradeSignal) -> None:
-    """Execute a trade on Capital.com if auto-trade is enabled."""
-    from trading_ai.trade.executor import place_trade
+def _execute_trade(client: CapitalComClient, trade_signal: TradeSignal, stats: dict) -> None:
+    """Execute a trade on Capital.com."""
+    from trading_ai.trade.executor import place_trade, has_open_position
+    from trading_ai.data.collector import _EPIC_MAP
 
-    size = SETTINGS.trade_size
-    logger.warning(
-        "AUTO-TRADE: placing %s %s size=%.4f entry=%.5f SL=%.5f TP=%.5f",
-        trade_signal.signal.value, trade_signal.symbol, size,
-        trade_signal.entry, trade_signal.stop_loss, trade_signal.take_profit,
-    )
+    symbol_enum = Symbol(trade_signal.symbol)
+    epic = _EPIC_MAP.get(symbol_enum)
 
+    # Check for existing position first
+    if epic:
+        existing = has_open_position(client, epic)
+        if existing:
+            display_trade_skipped_existing(trade_signal.symbol)
+            stats["trade_skipped"] = True
+            return
+
+    size = SETTINGS.get_trade_size(trade_signal.symbol)
     result = place_trade(client, trade_signal, size=size)
 
     if result.success:
-        logger.info(
-            "Trade executed: %s %s dealRef=%s SL=%.2f TP=%.2f",
-            result.direction, result.epic, result.deal_reference,
-            result.stop_level, result.profit_level,
-        )
+        display_trade_placed(result)
+        stats["trade_placed"] = True
     else:
-        logger.error(
-            "Trade FAILED: %s %s error=%s",
-            result.direction, result.epic, result.error,
-        )
+        if "already exists" in (result.error or "").lower():
+            display_trade_skipped_existing(trade_signal.symbol)
+            stats["trade_skipped"] = True
+        else:
+            display_trade_failed(result)
+            stats["trade_failed"] = True
 
 
-def _try_auto_train(symbol: str) -> None:
+def _try_auto_train(symbol: str, stats: dict) -> None:
     """Auto-train ML models if enough verified signals exist.
 
-    Trains once per symbol when the minimum threshold is reached.
-    Checks every cycle but only trains when new signals are available.
+    Only trains when new verified signals have been added since the last training.
     """
     from trading_ai.backtesting.walk_forward import run_walk_forward
-    from trading_ai.data.models import SignalVerification
+    from trading_ai.data.models import MLModelMeta, SignalVerification
 
     session_gen = get_session()
     session = next(session_gen)
@@ -292,58 +333,55 @@ def _try_auto_train(symbol: str) -> None:
     min_signals = SETTINGS.walk_forward.min_signals
 
     if verified_count < min_signals:
-        logger.info(
-            "Auto-train: %d/%d verified signals for %s — need %d more",
-            verified_count, min_signals, symbol, min_signals - verified_count,
-        )
+        display_auto_train_waiting(verified_count, min_signals)
         return
 
-    logger.info(
-        "Auto-train: %d verified signals for %s — starting training!",
-        verified_count, symbol,
-    )
+    # Check if we already trained on this many verified signals
+    last_train_count = None
+    try:
+        latest_model = (
+            session.query(MLModelMeta)
+            .filter(MLModelMeta.symbol == symbol, MLModelMeta.is_active == True)
+            .order_by(MLModelMeta.version.desc())
+            .first()
+        )
+        if latest_model:
+            last_train_count = latest_model.train_signal_count
+    except Exception:
+        pass
+
+    if last_train_count is not None and verified_count <= last_train_count:
+        display_auto_train_skipped(verified_count, last_train_count)
+        return
+
+    display_auto_train_starting(verified_count)
+    stats["auto_train_started"] = True
 
     try:
-        reports = run_walk_forward(symbol, "confluence")
+        reports = run_walk_forward(symbol, timeframe=None)
         for report in reports:
-            logger.info(
-                "Auto-train result: %s %s acc=%.4f auc=%.4f",
+            display_auto_train_result(
                 report.model_type, report.symbol,
                 report.mean_accuracy, report.mean_roc_auc,
             )
     except Exception as e:
         logger.error("Auto-train failed for %s: %s", symbol, e)
-    """Run walk-forward training for all symbol/timeframe combinations."""
-    from trading_ai.backtesting.walk_forward import run_walk_forward
-
-    for symbol in SETTINGS.symbols:
-        for timeframe in SETTINGS.timeframes:
-            logger.info("Training models for %s %s", symbol.value, timeframe.value)
-            reports = run_walk_forward(symbol.value, timeframe.value)
-
-            for report in reports:
-                logger.info(
-                    "Training result: %s %s %s acc=%.4f auc=%.4f",
-                    report.model_type, report.symbol, report.timeframe,
-                    report.mean_accuracy, report.mean_roc_auc,
-                )
 
 
 def main() -> None:
     """Main entry point."""
     _setup_logging()
-    logger.info("Trading AI system starting")
 
+    console.print("[bold cyan]Trading AI[/] starting...")
     create_tables()
 
     client = CapitalComClient()
     if not client.authenticate():
-        logger.error("Cannot authenticate with Capital.com. Check credentials.")
+        console.print("[bold red]✗ Cannot authenticate with Capital.com. Check credentials.[/]")
         sys.exit(1)
 
-    logger.info("System ready. Starting signal cycle.")
+    console.print("[green]✓ Authenticated with Capital.com[/]")
     run_signal_cycle(client)
-    logger.info("Signal cycle complete.")
 
 
 if __name__ == "__main__":

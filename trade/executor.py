@@ -15,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class OpenPosition:
+    """An existing open position on Capital.com."""
+    deal_id: str
+    epic: str
+    direction: str
+    size: float
+    level: float
+    upl: float
+    created_date: str
+
+
+@dataclass(frozen=True)
 class OrderResult:
     """Result of placing an order on Capital.com."""
     success: bool
@@ -27,6 +39,48 @@ class OrderResult:
     error: Optional[str] = None
 
 
+def get_open_positions(client: CapitalComClient) -> list[OpenPosition]:
+    """Fetch all currently open positions from Capital.com."""
+    url = f"{client._base_url}/api/v1/positions"
+
+    try:
+        resp = client._session.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.error("Failed to fetch open positions: %s", e)
+        return []
+
+    positions = []
+    for item in data.get("positions", []):
+        pos = item.get("position", {})
+        market = item.get("market", {})
+
+        positions.append(OpenPosition(
+            deal_id=pos.get("dealId", ""),
+            epic=market.get("epic", ""),
+            direction=pos.get("direction", ""),
+            size=float(pos.get("size", 0)),
+            level=float(pos.get("level", 0)),
+            upl=float(pos.get("upl", 0)),
+            created_date=pos.get("createdDateUTC", pos.get("createdDate", "")),
+        ))
+
+    return positions
+
+
+def has_open_position(client: CapitalComClient, epic: str) -> Optional[OpenPosition]:
+    """Check if there's already an open position for a given epic.
+
+    Returns the position if found, None if no position exists.
+    """
+    positions = get_open_positions(client)
+    for pos in positions:
+        if pos.epic == epic:
+            return pos
+    return None
+
+
 def place_trade(
     client: CapitalComClient,
     signal: TradeSignal,
@@ -35,16 +89,18 @@ def place_trade(
 ) -> OrderResult:
     """Place a market order on Capital.com based on a trade signal.
 
+    Checks for existing open positions first — skips if one already exists
+    for the same epic (prevents duplicate orders).
+
     Args:
         client: Authenticated Capital.com client.
         signal: The trade signal to execute.
         size: Position size (contracts/lots).
-        guaranteed_stop: Use guaranteed stop loss (wider but guaranteed fill).
+        guaranteed_stop: Use guaranteed stop loss.
 
     Returns:
         OrderResult with deal reference or error.
     """
-    # Map signal symbol to Capital.com epic
     symbol = Symbol(signal.symbol)
     epic = _EPIC_MAP.get(symbol)
     if not epic:
@@ -55,10 +111,23 @@ def place_trade(
             error=f"No epic mapping for {signal.symbol}",
         )
 
-    # Map signal direction to Capital.com direction
-    direction = signal.signal.value  # BUY or SELL — matches Capital.com format
+    # ── Check for existing open position ──
+    existing = has_open_position(client, epic)
+    if existing:
+        logger.warning(
+            "SKIP: already have open %s %s size=%.2f entry=%.2f upl=%.2f — no duplicate order",
+            existing.direction, existing.epic, existing.size,
+            existing.level, existing.upl,
+        )
+        return OrderResult(
+            success=False, deal_reference=None, epic=epic,
+            direction=signal.signal.value, size=size,
+            stop_level=signal.stop_loss, profit_level=signal.take_profit,
+            error=f"Open position already exists for {epic} (dealId={existing.deal_id})",
+        )
 
-    # Build order payload
+    direction = signal.signal.value
+
     payload = {
         "epic": epic,
         "direction": direction,
@@ -66,11 +135,9 @@ def place_trade(
         "guaranteedStop": guaranteed_stop,
     }
 
-    # Stop loss
     if signal.stop_loss and signal.signal != SignalType.NO_TRADE:
         payload["stopLevel"] = round(signal.stop_loss, 2)
 
-    # Take profit
     if signal.take_profit and signal.signal != SignalType.NO_TRADE:
         payload["profitLevel"] = round(signal.take_profit, 2)
 
@@ -89,7 +156,6 @@ def place_trade(
             deal_ref = data["dealReference"]
             logger.info("Order accepted: dealReference=%s", deal_ref)
 
-            # Confirm the deal
             confirmed = _confirm_deal(client, deal_ref)
 
             return OrderResult(
@@ -128,7 +194,7 @@ def _confirm_deal(client: CapitalComClient, deal_reference: str, retries: int = 
 
     for attempt in range(retries):
         try:
-            time.sleep(1)  # Give server time to process
+            time.sleep(1)
             resp = client._session.get(url, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()

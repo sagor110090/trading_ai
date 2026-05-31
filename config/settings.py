@@ -158,8 +158,13 @@ class MLConfig:
         "eval_metric": "Logloss",
         "verbose": 0,
     })
-    model_dir: str = "trading_ai/ml/models"
-    prediction_threshold: float = 0.5
+    model_dir: str = ""  # Set dynamically in load_settings() to absolute path
+    # ML prediction threshold: only take trades where ML probability >= this value
+    # 0.0 = take all trades (ML disabled), 0.3 = moderate filter, 0.5 = strict
+    prediction_threshold: float = 0.3
+    # Minimum verified signals before ML predictions are used for filtering
+    # Below this count, ML predictions are logged but don't block trades
+    min_verified_for_filter: int = 50
 
 
 @dataclass(frozen=True)
@@ -171,7 +176,16 @@ class WalkForwardConfig:
 
 @dataclass(frozen=True)
 class VerificationConfig:
+    # Max candles to check for SL/TP hit before declaring BREAKEVEN
+    # Scalping: trades resolve in 30-60min → 12 candles (6*2h buffer = 24)
+    # Day trading: hours → 36 candles
+    # Swing: days → 100 candles
+    # If SL/TP is hit within fewer candles, it's verified immediately.
     lookahead_candles: int = 50
+    # Minimum candles before we try to verify. If fewer candles exist after
+    # the signal, we skip it (not enough data yet). Set low so early
+    # SL/TP hits get caught quickly.
+    min_lookahead_candles: int = 5
     breakeven_threshold_pips: float = 1.0
 
 
@@ -189,7 +203,11 @@ class Settings:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
-    trade_size: float = 0.01
+    trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
+
+    def get_trade_size(self, symbol: str) -> float:
+        """Get position size for a symbol. Falls back to DEFAULT."""
+        return self.trade_sizes.get(symbol, self.trade_sizes.get("DEFAULT", 0.01))
     symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
     log_level: str = "INFO"
@@ -240,14 +258,28 @@ def load_settings() -> Settings:
         symbols = (Symbol.BTCUSD,)
 
     auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
-    trade_size = float(os.getenv("TRADE_SIZE", "0.01"))
+
+    # Read all TRADE_SIZE_<SYMBOL> from env
+    trade_sizes = {"DEFAULT": float(os.getenv("TRADE_SIZE_DEFAULT", "0.01"))}
+    for key, value in os.environ.items():
+        if key.startswith("TRADE_SIZE_") and key != "TRADE_SIZE_DEFAULT":
+            symbol_name = key.replace("TRADE_SIZE_", "")
+            try:
+                trade_sizes[symbol_name] = float(value)
+            except ValueError:
+                pass
+
+    # Model directory — absolute path so it works regardless of CWD
+    model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
+    prediction_threshold = float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))
 
     return Settings(
         capital_com=cap_cfg,
         database=db_cfg,
+        ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
-        trade_size=trade_size,
+        trade_sizes=trade_sizes,
         symbols=symbols,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )

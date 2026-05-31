@@ -54,7 +54,7 @@ class Signal(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     signal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
-    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
     signal: Mapped[str] = mapped_column(String(20), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     entry: Mapped[float] = mapped_column(Float, nullable=False)
@@ -132,7 +132,7 @@ class MLModelMeta(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     model_type: Mapped[str] = mapped_column(String(50), nullable=False)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
-    timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     filepath: Mapped[str] = mapped_column(Text, nullable=False)
     accuracy: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -140,6 +140,7 @@ class MLModelMeta(Base):
     recall: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     f1: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     roc_auc: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    train_signal_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     trained_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

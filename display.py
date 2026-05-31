@@ -1,0 +1,227 @@
+"""Rich terminal display for the trading AI system.
+
+Provides formatted, color-coded output for each cycle:
+signal panels, ML predictions, trade results, and summaries.
+"""
+
+import logging
+from typing import Optional
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
+
+from trading_ai.config.settings import SETTINGS
+from trading_ai.ml.predictor import Prediction
+from trading_ai.signals.engine import TradeSignal
+from trading_ai.trade.executor import OrderResult
+
+# Shared console instance
+console = Console()
+
+logger = logging.getLogger(__name__)
+
+# ── Cycle Header ──────────────────────────────────────────────────────────
+
+
+def display_cycle_header(symbol: str) -> None:
+    """Print a prominent cycle header for a symbol."""
+    console.print()
+    console.print(Rule(f"[bold cyan]{symbol}[/]", style="cyan"))
+    console.print()
+
+
+# ── Candle Fetch ──────────────────────────────────────────────────────────
+
+
+def display_candle_fetch(results: dict[str, int]) -> None:
+    """Show candle fetch results. results = {timeframe: new_count}."""
+    parts = []
+    for tf, count in results.items():
+        if count > 0:
+            parts.append(f"[green]+{count}[/] [dim]{tf}[/]")
+        else:
+            parts.append(f"[dim]0 {tf}[/]")
+    console.print(f"  [dim]Candles[/]  {' · '.join(parts)}")
+
+
+# ── Verification ──────────────────────────────────────────────────────────
+
+
+def display_verification_summary(verified: int, pending: int) -> None:
+    """Show signal verification summary."""
+    if verified > 0:
+        console.print(
+            f"  [dim]Verified[/]  [green]{verified}[/] signal{'s' if verified != 1 else ''} "
+            f"[dim]· {pending} still pending[/]"
+        )
+    elif pending > 0:
+        console.print(
+            f"  [dim]Verified[/]  0 signals · [dim]{pending} pending (need more data)[/]"
+        )
+
+
+# ── Signal Display ────────────────────────────────────────────────────────
+
+
+def display_signal(signal: TradeSignal) -> None:
+    """Show a generated trade signal in a styled panel."""
+    direction = signal.signal.value
+    dir_style = "[bold green]BUY[/]" if direction == "BUY" else "[bold red]SELL[/]"
+    dir_emoji = "📈" if direction == "BUY" else "📉"
+
+    risk = abs(signal.entry - signal.stop_loss)
+    rr = abs(signal.take_profit - signal.entry) / risk if risk > 0 else 0
+
+    content = (
+        f"  {dir_emoji} {dir_style}  [white]{signal.symbol}[/]  "
+        f"[dim]confidence=[/]{signal.confidence:.1f}%\n"
+        f"  [dim]Entry[/]  {signal.entry:,.2f}    [dim]SL[/]  {signal.stop_loss:,.2f}\n"
+        f"  [dim]TP[/]     {signal.take_profit:,.2f}    [dim]R:R[/] 1:{rr:.1f}\n"
+        f"  [dim]Mode[/]    {signal.trade_mode}  [{signal.confluence}]"
+    )
+
+    console.print(Panel(content, title="[bold]Signal[/]", border_style="cyan", padding=(0, 2)))
+
+
+def display_no_signal(symbol: str) -> None:
+    """Show that no signal was generated."""
+    console.print(f"  [dim]No signal for {symbol} this cycle[/]")
+
+
+# ── ML Prediction ─────────────────────────────────────────────────────────
+
+
+def display_ml_prediction(prediction: Prediction, threshold: float, blocked: bool) -> None:
+    """Show ML prediction result with filter decision."""
+    if blocked:
+        content = (
+            f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
+            f"probability [bold red]{prediction.probability:.1%}[/]\n"
+            f"  [bold red]❌ BLOCKED[/]  below {threshold:.0%} threshold"
+        )
+        console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="red", padding=(0, 2)))
+    else:
+        content = (
+            f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
+            f"probability [bold green]{prediction.probability:.1%}[/]\n"
+            f"  [bold green]✅ APPROVED[/]  above {threshold:.0%} threshold"
+        )
+        console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="green", padding=(0, 2)))
+
+
+def display_no_ml_model() -> None:
+    """Show that no ML model is available (rule-based only)."""
+    console.print(f"  [dim]ML[/]  No model — using rule-based confidence only")
+
+
+# ── Trade Result ───────────────────────────────────────────────────────────
+
+
+def display_trade_placed(result: OrderResult) -> None:
+    """Show a successful trade placement."""
+    dir_style = "[bold green]BUY[/]" if result.direction == "BUY" else "[bold red]SELL[/]"
+    content = (
+        f"  ✅ {dir_style}  [white]{result.epic}[/]  [dim]size=[/]{result.size}\n"
+        f"  [dim]SL[/]  {result.stop_level:,.2f}  [dim]TP[/]  {result.profit_level:,.2f}\n"
+        f"  [dim]Ref[/]  {result.deal_reference}"
+    )
+    console.print(Panel(content, title="[bold green]Trade Placed[/]", border_style="green", padding=(0, 2)))
+
+
+def display_trade_blocked(reason: str) -> None:
+    """Show that a trade was blocked."""
+    console.print(f"  [yellow]⏭  Trade blocked:[/] {reason}")
+
+
+def display_trade_failed(result: OrderResult) -> None:
+    """Show a failed trade."""
+    content = f"  [bold red]❌ FAILED[/]  {result.direction} {result.epic}\n  [dim]{result.error}[/]"
+    console.print(Panel(content, title="[bold red]Trade Error[/]", border_style="red", padding=(0, 2)))
+
+
+def display_trade_skipped_existing(symbol: str) -> None:
+    """Show that a trade was skipped because a position already exists."""
+    console.print(f"  [yellow]⏭  Skipped: open position already exists for {symbol}[/]")
+
+
+# ── Auto-Train ────────────────────────────────────────────────────────────
+
+
+def display_auto_train_waiting(verified: int, needed: int) -> None:
+    """Show auto-train waiting for more data."""
+    console.print(
+        f"  [dim]🔄 Auto-train[/]  {verified}/{needed} verified — "
+        f"[dim]need {needed - verified} more[/]"
+    )
+
+
+def display_auto_train_skipped(verified: int, last_trained: int) -> None:
+    """Show auto-train skipping because already trained on this many signals."""
+    console.print(
+        f"  [dim]🔄 Auto-train[/]  {verified} verified · last trained on {last_trained} — [dim]skipping[/]"
+    )
+
+
+def display_auto_train_starting(verified: int) -> None:
+    """Show auto-train starting."""
+    console.print(f"  [bold cyan]🔄 Auto-train[/]  {verified} verified — training...")
+
+
+def display_auto_train_result(model_type: str, symbol: str, accuracy: float, auc: float) -> None:
+    """Show a single model training result."""
+    auc_str = f"{auc:.4f}" if auc and auc > 0 else "N/A"
+    console.print(f"  [dim]  {model_type:10s}[/]  acc={accuracy:.1%}  auc={auc_str}")
+
+
+# ── Cycle Summary ─────────────────────────────────────────────────────────
+
+
+def display_cycle_summary(stats: dict) -> None:
+    """Print end-of-cycle summary panel."""
+    lines = []
+
+    # Signals
+    if stats.get("signal_generated"):
+        sig = stats["signal"]
+        direction = sig.signal.value if hasattr(sig.signal, "value") else str(sig.signal)
+        dir_emoji = "📈" if direction == "BUY" else "📉"
+        lines.append(f"{dir_emoji} {direction} {sig.symbol}")
+        lines.append(f"   Entry {sig.entry:,.2f}  SL {sig.stop_loss:,.2f}  TP {sig.take_profit:,.2f}")
+    else:
+        lines.append("[dim]No signal generated[/]")
+
+    # ML
+    if stats.get("ml_prediction"):
+        pred = stats["ml_prediction"]
+        if stats.get("ml_blocked"):
+            lines.append(f"🤖 ML: [red]{pred.probability:.1%}[/] → BLOCKED")
+        elif stats.get("ml_approved"):
+            lines.append(f"🤖 ML: [green]{pred.probability:.1%}[/] → Approved")
+    elif stats.get("no_ml"):
+        lines.append("🤖 ML: [dim]No model[/]")
+
+    # Trade
+    if stats.get("trade_placed"):
+        lines.append("✅ [green]Trade placed[/]")
+    elif stats.get("trade_blocked"):
+        lines.append("🔒 [yellow]Trade blocked[/]")
+    elif stats.get("trade_skipped"):
+        lines.append("⏭  [dim]Trade skipped[/]")
+    elif stats.get("trade_failed"):
+        lines.append("❌ [red]Trade failed[/]")
+
+    # Verification
+    if stats.get("verified", 0) > 0:
+        lines.append(f"🔍 Verified [green]{stats['verified']}[/] signals")
+
+    # Auto-train
+    if stats.get("auto_train_started"):
+        lines.append("🔄 [cyan]Model retrained[/]")
+
+    content = "\n".join(lines)
+    console.print()
+    console.print(Panel(content, title="[bold]Cycle Summary[/]", border_style="bright_black", padding=(0, 2)))
+    console.print()

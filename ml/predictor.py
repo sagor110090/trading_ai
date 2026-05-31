@@ -42,7 +42,7 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
     session_gen = __import__("trading_ai.data.database", fromlist=["get_session"]).get_session()
     session = next(session_gen)
     try:
-        # Prefer CatBoost > LightGBM > XGBoost based on AUC
+        # Prefer best AUC among active models for this symbol/timeframe
         meta = (
             session.query(MLModelMeta)
             .filter(
@@ -58,6 +58,9 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
             return None
 
         filepath = meta.filepath
+        # Resolve relative paths against MODEL_DIR
+        if not os.path.isabs(filepath):
+            filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
         if not os.path.exists(filepath):
             logger.warning("Model file not found: %s", filepath)
             return None
@@ -84,13 +87,20 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     ML does NOT generate signals. It only evaluates the probability
     that the rule-based signal will succeed.
 
+    Looks for models trained with timeframe="all" first (confluence/multi-TF),
+    then falls back to models matching the signal's own timeframe.
+
     Args:
         signal: The rule-based TradeSignal to evaluate.
 
     Returns:
         Prediction with ML-adjusted confidence, or None if no model available.
     """
-    result = _load_active_model(signal.symbol, signal.timeframe)
+    # Prefer the "all" timeframe model (trained on all signals for the symbol)
+    result = _load_active_model(signal.symbol, "all")
+    if result is None:
+        # Fallback: try signal's own timeframe
+        result = _load_active_model(signal.symbol, signal.timeframe)
     if result is None:
         logger.info("No active ML model for %s %s", signal.symbol, signal.timeframe)
         return None

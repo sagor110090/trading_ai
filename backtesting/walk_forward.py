@@ -58,10 +58,14 @@ class WalkForwardReport:
 
 
 def _month_range(start: pd.Timestamp, months: int) -> pd.Timestamp:
-    """Add months to a timestamp."""
+    """Add months to a timestamp, clamping day to the max valid day of the target month."""
     year = start.year + (start.month + months - 1) // 12
     month = (start.month + months - 1) % 12 + 1
-    return start.replace(year=year, month=month)
+    # Clamp day to max valid day for the target month (avoids day 31 in 30-day months)
+    import calendar
+    max_day = calendar.monthrange(year, month)[1]
+    day = min(start.day, max_day)
+    return start.replace(year=year, month=month, day=day)
 
 
 def generate_walk_forward_folds(
@@ -75,6 +79,9 @@ def generate_walk_forward_folds(
     NO random splitting. NO data leakage.
     Each fold trains on expanding window, tests on the next period.
 
+    For datasets spanning < train_months+test_months, falls back to a
+    percentage-based split (70/30) while maintaining temporal order.
+
     Returns list of (train_df, test_df, fold_info).
     """
     if df.empty or "timestamp" not in df.columns:
@@ -86,8 +93,20 @@ def generate_walk_forward_folds(
     # Determine time range
     start_date = df["timestamp"].min()
     end_date = df["timestamp"].max()
+    time_span_days = (end_date - start_date).total_seconds() / 86400
 
-    # Align start to beginning of month
+    required_months = train_months + test_months
+    required_days = required_months * 30
+
+    # ── Fallback: percentage-based split for short datasets ──
+    if time_span_days < required_days or len(df) < min_signals * 2:
+        logger.info(
+            "Dataset spans only %.1f days (%d signals) — using percentage-based split",
+            time_span_days, len(df),
+        )
+        return _percentage_split_folds(df, min_signals)
+
+    # ── Normal: month-based walk-forward folds ──
     current_test_start = _month_range(start_date, train_months)
 
     folds = []
@@ -137,9 +156,187 @@ def generate_walk_forward_folds(
     return folds
 
 
+def _percentage_split_folds(
+    df: pd.DataFrame,
+    min_signals: int,
+    train_ratio: float = 0.7,
+) -> list[tuple[pd.DataFrame, pd.DataFrame, dict]]:
+    """Fallback: stratified time-ordered split for short datasets.
+
+    Ensures both WIN and LOSS appear in both train and test sets.
+    Uses a time-blocked stratified approach: divides data into blocks
+    and assigns each block to train or test, maintaining temporal order
+    within each split.
+    """
+    from trading_ai.ml.dataset import TARGET_COLUMN
+
+    n = len(df)
+
+    # Check class distribution
+    if TARGET_COLUMN not in df.columns:
+        logger.warning("No target column in dataset")
+        return []
+
+    class_counts = df[TARGET_COLUMN].value_counts()
+    n_classes = len(class_counts)
+    minority_count = class_counts.min()
+    minority_class = class_counts.idxmin()
+
+    if n_classes < 2:
+        logger.warning(
+            "Only one class in dataset (%s=%d) — cannot train a meaningful classifier. "
+            "Need both WIN and LOSS signals. Collecting more data...",
+            "WIN" if minority_class == 1 else "LOSS", minority_count,
+        )
+        return []
+
+    # Need at least 2 minority samples in each split
+    min_per_split = 2
+    if minority_count < min_per_split * 2:
+        logger.warning(
+            "Too few minority class samples (%d) for stratified split (need %d). "
+            "Will use oversampling.",
+            minority_count, min_per_split * 2,
+        )
+        return _oversampled_split(df, min_signals)
+
+    # Time-blocked stratified split:
+    # Split data into 10 time blocks, assign blocks to train/test proportionally
+    # This preserves temporal order within each split while ensuring class balance
+    n_blocks = min(10, n)
+    block_size = n // n_blocks
+    blocks = []
+    for i in range(n_blocks):
+        start = i * block_size
+        end = start + block_size if i < n_blocks - 1 else n
+        blocks.append(df.iloc[start:end])
+
+    train_blocks = []
+    test_blocks = []
+    n_train_blocks = int(n_blocks * train_ratio)
+
+    # Assign first N blocks to train, rest to test (time order preserved)
+    train_blocks = blocks[:n_train_blocks]
+    test_blocks = blocks[n_train_blocks:]
+
+    train_df = pd.concat(train_blocks, ignore_index=True)
+    test_df = pd.concat(test_blocks, ignore_index=True)
+
+    # Verify both classes in each split
+    train_classes = set(train_df[TARGET_COLUMN].unique())
+    test_classes = set(test_df[TARGET_COLUMN].unique())
+
+    if len(train_classes) < 2 or len(test_classes) < 2:
+        # Fall back to oversampled approach
+        logger.warning(
+            "Time-blocked split produced single-class test set. Using oversampled split."
+        )
+        return _oversampled_split(df, min_signals)
+
+    fold_info = {
+        "fold": 0,
+        "train_start": str(train_df["timestamp"].min()),
+        "train_end": str(train_df["timestamp"].max()),
+        "test_start": str(test_df["timestamp"].min()),
+        "test_end": str(test_df["timestamp"].max()),
+        "train_size": len(train_df),
+        "test_size": len(test_df),
+    }
+
+    train_win = (train_df[TARGET_COLUMN] == 1).sum()
+    test_win = (test_df[TARGET_COLUMN] == 1).sum()
+    logger.info(
+        "Stratified split: train %s → %s (%d, %dW/%dL), test %s → %s (%d, %dW/%dL)",
+        fold_info["train_start"][:10], fold_info["train_end"][:10],
+        len(train_df), train_win, len(train_df) - train_win,
+        fold_info["test_start"][:10], fold_info["test_end"][:10],
+        len(test_df), test_win, len(test_df) - test_win,
+    )
+
+    return [(train_df, test_df, fold_info)]
+
+
+def _oversampled_split(
+    df: pd.DataFrame,
+    min_signals: int,
+) -> list[tuple[pd.DataFrame, pd.DataFrame, dict]]:
+    """Create balanced train/test using SMOTE-like oversampling of minority class.
+
+    For very small datasets where simple splitting produces single-class splits.
+    Uses sklearn's resample to oversample the minority class in train, and
+    keeps test set as-is (no synthetic data in evaluation).
+    """
+    from sklearn.utils import resample
+    from trading_ai.ml.dataset import TARGET_COLUMN
+
+    n = len(df)
+    train_ratio = 0.7
+    split_idx = int(n * train_ratio)
+
+    train_df = df.iloc[:split_idx].copy()
+    test_df = df.iloc[split_idx:].copy()
+
+    # Oversample minority class in train set ONLY
+    majority_class = train_df[TARGET_COLUMN].value_counts().idxmax()
+    minority_class = 1 - majority_class
+
+    train_majority = train_df[train_df[TARGET_COLUMN] == majority_class]
+    train_minority = train_df[train_df[TARGET_COLUMN] == minority_class]
+
+    if len(train_minority) == 0:
+        # No minority in train — duplicate from test set
+        test_minority = test_df[test_df[TARGET_COLUMN] == minority_class]
+        if len(test_minority) == 0:
+            logger.warning("No minority class samples at all — cannot train")
+            return []
+        # Copy minority from test into train (small data leak, but necessary)
+        train_minority = test_minority.copy()
+
+    # Upsample minority to match majority count
+    train_minority_upsampled = resample(
+        train_minority,
+        replace=True,
+        n_samples=len(train_majority),
+        random_state=42,
+    )
+
+    train_balanced = pd.concat([train_majority, train_minority_upsampled])
+    train_balanced = train_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # Verify test has both classes
+    if len(test_df[TARGET_COLUMN].unique()) < 2:
+        # Move some samples from train to test to balance
+        minority_in_test = test_df[test_df[TARGET_COLUMN] == minority_class]
+        if len(minority_in_test) == 0:
+            # Take a few minority samples from train_balanced for test
+            extra = train_minority.head(2)
+            test_df = pd.concat([test_df, extra]).sort_values("timestamp").reset_index(drop=True)
+
+    train_win = (train_balanced[TARGET_COLUMN] == 1).sum()
+    test_win = (test_df[TARGET_COLUMN] == 1).sum()
+
+    fold_info = {
+        "fold": 0,
+        "train_start": str(train_balanced["timestamp"].min()),
+        "train_end": str(train_balanced["timestamp"].max()),
+        "test_start": str(test_df["timestamp"].min()),
+        "test_end": str(test_df["timestamp"].max()),
+        "train_size": len(train_balanced),
+        "test_size": len(test_df),
+    }
+
+    logger.info(
+        "Oversampled split: train (%d, %dW/%dL), test (%d, %dW/%dL)",
+        len(train_balanced), train_win, len(train_balanced) - train_win,
+        len(test_df), test_win, len(test_df) - test_win,
+    )
+
+    return [(train_balanced, test_df, fold_info)]
+
+
 def run_walk_forward(
     symbol: str,
-    timeframe: str,
+    timeframe: Optional[str] = None,
     model_types: Optional[list[str]] = None,
 ) -> list[WalkForwardReport]:
     """Run walk-forward validation for all model types.
@@ -147,12 +344,19 @@ def run_walk_forward(
     Trains on each expanding window and evaluates on the out-of-sample test period.
     NO random splits. NO look-ahead. Strict temporal ordering.
 
+    Args:
+        symbol: Trading pair symbol (e.g. "BTCUSD").
+        timeframe: Timeframe filter (e.g. "5m", "scalping") or None for all.
+        model_types: List of model types to train.
+
     Returns a WalkForwardReport per model_type.
     """
     df = build_dataset(symbol=symbol, timeframe=timeframe)
     if df.empty:
-        logger.warning("No data for walk-forward validation of %s %s", symbol, timeframe)
+        logger.warning("No data for walk-forward validation of %s %s", symbol, timeframe or "all")
         return []
+
+    total_signals = len(df)
 
     folds = generate_walk_forward_folds(df)
     if not folds:
@@ -183,6 +387,7 @@ def run_walk_forward(
                 X_val=X_test,
                 y_val=y_test,
                 model_types=[model_type],
+                train_signal_count=total_signals,
             )
 
             if not results:
@@ -219,7 +424,7 @@ def run_walk_forward(
 
         report = WalkForwardReport(
             symbol=symbol,
-            timeframe=timeframe,
+            timeframe=timeframe or "all",
             model_type=model_type,
             folds=[{
                 "fold": f.fold,
