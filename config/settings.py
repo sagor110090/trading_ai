@@ -143,8 +143,8 @@ class ScalpingConfig:
 @dataclass(frozen=True)
 class DayTradingConfig:
     """Day trading: close same day. M5 entry, H1 trend, H4 big picture."""
-    sl_atr_mult: float = 1.0
-    tp_atr_mult: float = 1.5
+    sl_atr_mult: float = 0.7
+    tp_atr_mult: float = 1.2
     confidence_threshold: float = 35.0
     trend_timeframe: str = "1h"
     entry_timeframe: str = "5m"
@@ -210,6 +210,8 @@ class MLConfig:
     # Minimum verified signals before ML predictions are used for filtering
     # Below this count, ML predictions are logged but don't block trades
     min_verified_for_filter: int = 50
+    # Auto-train models during live trading (recommended: false - train via backtest instead)
+    auto_train: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,11 +224,11 @@ class WalkForwardConfig:
 @dataclass(frozen=True)
 class VerificationConfig:
     # Max candles to check for SL/TP hit before declaring BREAKEVEN
-    # Scalping: trades resolve in 30-60min → 12 candles (6*2h buffer = 24)
-    # Day trading: hours → 36 candles
-    # Swing: days → 100 candles
+    # Scalping: trades resolve in 30-60min → 24 candles
+    # Day trading: hours → 100 candles (8+ hours)
+    # Swing: days → 200 candles
     # If SL/TP is hit within fewer candles, it's verified immediately.
-    lookahead_candles: int = 50
+    lookahead_candles: int = 100
     # Minimum candles before we try to verify. If fewer candles exist after
     # the signal, we skip it (not enough data yet). Set low so early
     # SL/TP hits get caught quickly.
@@ -343,13 +345,14 @@ def load_settings() -> Settings:
     # Model directory — absolute path so it works regardless of CWD
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
     prediction_threshold = float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))
+    auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
 
     return Settings(
         capital_com=cap_cfg,
         mt5=mt5_cfg,
         trading_platform=trading_platform,
         database=db_cfg,
-        ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold),
+        ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold, auto_train=auto_train),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         trailing_stop_enabled=trailing_stop_enabled,

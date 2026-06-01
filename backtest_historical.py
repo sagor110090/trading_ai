@@ -27,7 +27,7 @@ from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
-from trading_ai.config.settings import SETTINGS, Symbol, Timeframe, TradeMode
+from trading_ai.config.settings import SETTINGS, Symbol, Timeframe, TradeMode, TradingPlatform
 from trading_ai.data.collector import CapitalComClient
 from trading_ai.data.database import create_tables, get_session
 from trading_ai.data.models import Candle, Signal, SignalVerification
@@ -128,22 +128,23 @@ def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 5000) -> pd.
 
 
 def _fetch_candles_batched(
-    client: CapitalComClient,
+    client,
     symbol: Symbol,
     timeframe: Timeframe,
     weeks: int = 4,
 ) -> pd.DataFrame:
     """Fetch historical candles in batches to get weeks of data.
 
-    Capital.com API returns at most 1000 candles per request.
-    We use the `from` parameter to paginate back in time:
-    - First request: latest 1000 candles (no from_date)
-    - Subsequent requests: from_date = earliest timestamp from previous batch
+    Supports both Capital.com and MT5 clients.
+    - Capital.com: API returns max 1000 candles, paginate with from_date
+    - MT5: Can fetch larger ranges, uses copy_rates_range
 
-    For M5, 1000 candles ≈ 3.5 days. For H1, 1000 candles ≈ 42 days.
+    For M5: 12 candles/hour, 288/day, 2016/week
+    For H1: 1 candle/hour, 24/day, 168/week
+    For H4: 6 candles/day, 42/week
 
     Args:
-        client: Authenticated Capital.com client.
+        client: Authenticated client (CapitalComClient or MT5Client).
         symbol: Trading symbol.
         timeframe: Candle timeframe.
         weeks: Number of weeks of historical data to fetch.
@@ -155,9 +156,6 @@ def _fetch_candles_batched(
     all_dfs = []
 
     # Calculate how many candles we need per timeframe
-    # M5: 12 candles/hour, 288/day, 2016/week
-    # H1: 1 candle/hour, 24/day, 168/week
-    # H4: 6 candles/day, 42/week
     candles_per_week = {
         Timeframe.M5: 288 * 7,   # 2016
         Timeframe.H1: 24 * 7,    # 168
@@ -165,59 +163,86 @@ def _fetch_candles_batched(
     }
     target_candles = candles_per_week.get(timeframe, 2000) * weeks
 
-    # Fetch in batches of 1000 (API max per request)
-    # Each batch gets the 1000 candles starting from from_date
-    from_date = None
-    batch = 0
+    # Check if using MT5 client
+    is_mt5 = hasattr(client, '_connected') or hasattr(client, '_mt5')
 
-    while len(all_dfs) == 0 or sum(len(df) for df in all_dfs) < target_candles:
-        batch += 1
+    if is_mt5:
+        # MT5 can fetch larger date ranges at once
+        # Calculate start date based on weeks requested
+        from_date = now - timedelta(weeks=weeks)
 
-        if from_date:
-            console.print(
-                f"  [dim]Batch {batch}[/]  "
-                f"[dim]from {from_date[:10]}[/]", highlight=False
-            )
-        else:
-            console.print(
-                f"  [dim]Batch {batch}[/]  "
-                f"[dim]latest[/]", highlight=False
-            )
+        console.print(
+            f"  [dim]MT5 fetch[/]  from {from_date.strftime('%Y-%m-%d')} to {now.strftime('%Y-%m-%d')}"
+        )
 
         try:
             df = client.fetch_candles(
                 symbol, timeframe,
-                limit=1000,
                 from_date=from_date,
+                to_date=now,
             )
             if not df.empty:
                 all_dfs.append(df)
                 console.print(f"    [green]+{len(df)}[/] [dim]{timeframe.value} candles[/]")
-
-                # Next batch starts from the earliest candle we have
-                earliest_ts = df["timestamp"].min()
-                from_date = earliest_ts.strftime("%Y-%m-%dT%H:%M:%S")
-
-                # If we got fewer than 1000, we've reached the API's data limit
-                if len(df) < 1000:
-                    console.print(f"    [dim]API data limit reached[/]")
-                    break
             else:
-                console.print(f"    [dim]0 {timeframe.value} candles — stopping[/]")
-                break
+                console.print(f"    [dim]0 {timeframe.value} candles[/]")
         except Exception as e:
-            logger.warning("Batch fetch failed for %s %s: %s",
+            logger.warning("MT5 fetch failed for %s %s: %s",
                          symbol.value, timeframe.value, e)
             console.print(f"    [red]Error: {e}[/]")
-            break
+    else:
+        # Capital.com: batch fetching with 1000 candle limit
+        from_date = None
+        batch = 0
 
-        # Safety: max 10 batches to avoid infinite loops
-        if batch >= 10:
-            console.print(f"    [dim]Max batches reached[/]")
-            break
+        while len(all_dfs) == 0 or sum(len(df) for df in all_dfs) < target_candles:
+            batch += 1
 
-        # Small delay to avoid rate limiting
-        time.sleep(0.5)
+            if from_date:
+                console.print(
+                    f"  [dim]Batch {batch}[/]  "
+                    f"[dim]from {from_date[:10]}[/]", highlight=False
+                )
+            else:
+                console.print(
+                    f"  [dim]Batch {batch}[/]  "
+                    f"[dim]latest[/]", highlight=False
+                )
+
+            try:
+                df = client.fetch_candles(
+                    symbol, timeframe,
+                    limit=1000,
+                    from_date=from_date,
+                )
+                if not df.empty:
+                    all_dfs.append(df)
+                    console.print(f"    [green]+{len(df)}[/] [dim]{timeframe.value} candles[/]")
+
+                    # Next batch starts from the earliest candle we have
+                    earliest_ts = df["timestamp"].min()
+                    from_date = earliest_ts.strftime("%Y-%m-%dT%H:%M:%S")
+
+                    # If we got fewer than 1000, we've reached the API's data limit
+                    if len(df) < 1000:
+                        console.print(f"    [dim]API data limit reached[/]")
+                        break
+                else:
+                    console.print(f"    [dim]0 {timeframe.value} candles — stopping[/]")
+                    break
+            except Exception as e:
+                logger.warning("Batch fetch failed for %s %s: %s",
+                             symbol.value, timeframe.value, e)
+                console.print(f"    [red]Error: {e}[/]")
+                break
+
+            # Safety: max 10 batches to avoid infinite loops
+            if batch >= 10:
+                console.print(f"    [dim]Max batches reached[/]")
+                break
+
+            # Small delay to avoid rate limiting
+            time.sleep(0.5)
 
     if not all_dfs:
         return pd.DataFrame()
@@ -280,10 +305,20 @@ def backfill_signals(
     # ── 1. Fetch historical candles ────────────────────────────────────
     console.print(f"\n[bold cyan]📥 Fetching {weeks} weeks of data for {symbol.value}...[/]")
 
-    client = CapitalComClient()
-    if not client.authenticate():
-        console.print("[bold red]✗ Authentication failed[/]")
-        return {"error": "auth_failed"}
+    # Create appropriate client based on platform
+    if SETTINGS.trading_platform == TradingPlatform.MT5:
+        from trading_ai.data.mt5_client import MT5Client
+        client = MT5Client()
+        if not client.connect():
+            console.print("[bold red]✗ MT5 connection failed[/]")
+            return {"error": "mt5_failed"}
+        console.print("[green]✓ Connected to MT5[/]")
+    else:
+        client = CapitalComClient()
+        if not client.authenticate():
+            console.print("[bold red]✗ Authentication failed[/]")
+            return {"error": "auth_failed"}
+        console.print("[green]✓ Connected to Capital.com[/]")
 
     df_m5 = _fetch_candles_batched(client, symbol, Timeframe.M5, weeks=weeks)
     df_h1 = _fetch_candles_batched(client, symbol, Timeframe.H1, weeks=weeks)
@@ -660,7 +695,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--symbol", type=str, default=None,
-        choices=["XAUUSD", "BTCUSD"],
+        choices=["XAUUSD", "BTCUSD", "ETHUSD", "EURUSD", "GBPUSD", "XAGUSD", "USDJPY", "USDCHF", "EURGBP", "EURJPY", "GBPJPY", "AUDUSD", "NZDUSD", "USDCAD"],
         help="Symbol (default: from .env SYMBOLS)"
     )
     parser.add_argument(

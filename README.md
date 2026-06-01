@@ -1,6 +1,6 @@
 # Trading AI
 
-Self-learning trading prediction system for **XAUUSD** and **BTCUSD** using the Capital.com API. Combines rule-based multi-timeframe confluence signals with ML filtering (XGBoost / LightGBM / CatBoost) that improves itself over time.
+Self-learning trading prediction system using **multi-symbol support** with both **MetaTrader 5** and **Capital.com** APIs. Combines rule-based multi-timeframe confluence signals with ML filtering (XGBoost / LightGBM / CatBoost) that improves itself over time.
 
 ---
 
@@ -30,20 +30,20 @@ Self-learning trading prediction system for **XAUUSD** and **BTCUSD** using the 
                       │
                       ▼
               ┌──────────────┐     ┌──────────────┐
-              │ ML Predictor │────▶│  ≥ 30% prob?  │
+              │ ML Predictor │────▶│  ≥ Threshold? │
               │ (catboost,   │     └──────┬───────┘
               │  xgboost,    │            │
               │  lightgbm)   │     ┌──────┴───────┐
               └──────────────┘     ▼              ▼
-                               APPROVED       BLOCKED
-                                  │
-                                  ▼
-                          ┌──────────────┐
-                          │  Auto Trade  │──── Place Order
-                          │  (if on)     │──── Set SL / TP
-                          └──────────────┘
-                                  │
-                                  ▼
+                                   APPROVED       BLOCKED
+                                      │
+                                      ▼
+                              ┌──────────────┐
+                              │  Auto Trade  │──── Place Order
+                              │  (if on)     │──── Set SL / TP
+                              └──────────────┘
+                                      │
+                                      ▼
                         ┌──────────────────┐
                         │   Auto-Train     │
                         │ (new verified    │
@@ -53,12 +53,12 @@ Self-learning trading prediction system for **XAUUSD** and **BTCUSD** using the 
 
 ### Signal Flow
 
-1. **Fetch** — Pull latest M5, H1, H4 candles from Capital.com API
+1. **Fetch** — Pull latest M5, H1, H4 candles from MT5 or Capital.com API
 2. **Verify** — Check if any pending signals hit SL/TP in recent candles → label WIN/LOSS
 3. **Timeout** — Close positions that exceeded max hold time
 4. **Confluence** — H4 sets the big trend, H1 confirms, M5 triggers entry
-5. **ML Filter** — Pre-trained model predicts probability of success; block below 30%
-6. **Trade** — Place order on Capital.com (if `AUTO_TRADE=true`)
+5. **ML Filter** — Pre-trained model predicts probability of success; blocks below threshold
+6. **Trade** — Place order on MT5 or Capital.com (if `AUTO_TRADE=true`)
 7. **Auto-Train** — Re-train ML when new verified signals accumulate
 
 ### ML Self-Learning Loop
@@ -78,9 +78,11 @@ The ML does **not** generate signals. It only **filters** rule-based signals —
 ### 1. Install Dependencies
 
 ```bash
-cd /Users/sagor/Code/trading_ai
-source venv/bin/activate
+cd C:/Users/mehed/Herd/trading_ai
+python -m venv venv
+venv\Scripts\activate  # Windows
 pip install -r requirements.txt
+pip install MetaTrader5  # For MT5 support
 ```
 
 ### 2. Configure `.env`
@@ -89,48 +91,93 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` with your Capital.com credentials and preferences:
+Edit `.env` with your credentials and preferences:
 
+#### Platform Selection
+| Key | Description | Example |
+|-----|-------------|---------|
+| `TRADING_PLATFORM` | `CAPITAL` or `MT5` | `MT5` |
+
+#### MT5 Settings (if TRADING_PLATFORM=MT5)
+| Key | Description | Example |
+|-----|-------------|---------|
+| `MT5_LOGIN` | MT5 account number | `370275` |
+| `MT5_PASSWORD` | MT5 password | `YourPassword` |
+| `MT5_SERVER` | Broker server name | `FusionMarkets-Demo` |
+
+#### Capital.com Settings (if TRADING_PLATFORM=CAPITAL)
 | Key | Description | Example |
 |-----|-------------|---------|
 | `CAPITAL_API_KEY` | Capital.com API key | `b3XJpRBS...` |
 | `CAPITAL_IDENTIFIER` | Login email | `you@email.com` |
 | `CAPITAL_PASSWORD` | Login password | `@YourPassword` |
 | `CAPITAL_USE_DEMO` | Use demo account | `true` |
-| `DB_HOST` | MySQL host | `127.0.0.1` |
-| `DB_PORT` | MySQL port | `3307` |
-| `DB_USER` | MySQL user | `root` |
-| `DB_PASSWORD` | MySQL password | `root` |
+
+#### Trading Settings
+| Key | Description | Example |
+|-----|-------------|---------|
+| `USE_SQLITE` | Use SQLite instead of MySQL | `true` |
 | `TRADE_MODE` | `scalping` / `day_trading` / `swing` | `day_trading` |
 | `AUTO_TRADE` | Place real orders | `true` or `false` |
-| `SYMBOLS` | Comma-separated | `BTCUSD` or `XAUUSD,BTCUSD` |
-| `ML_PREDICTION_THRESHOLD` | Min ML probability to trade | `0.3` |
+| `TRAILING_STOP_ENABLED` | Move SL at profit milestones | `true` |
+| `SYMBOLS` | Comma-separated symbols | `BTCUSD,XAUUSD,ETHUSD,EURUSD,GBPUSD` |
+| `ML_PREDICTION_THRESHOLD` | Min ML probability to trade (0.0-1.0) | `0.3` |
 | `TRADE_SIZE_DEFAULT` | Default position size | `0.01` |
-| `TRADE_SIZE_XAUUSD` | Gold position size | `0.01` |
-| `TRADE_SIZE_BTCUSD` | Bitcoin position size | `0.1` |
+| `TRADE_SIZE_*` | Symbol-specific size | `TRADE_SIZE_XAUUSD=0.01` |
 | `RUN_INTERVAL` | Seconds between cycles | `300` |
 
-### 3. Set Up Database
+### 3. Supported Symbols
 
-MySQL must be running. The system creates tables automatically on first run.
+**Crypto:** BTCUSD, ETHUSD, LTCUSD, BCHUSD, XRPUSD, BTCEUR, ETHGBP
 
-### 4. Backfill Historical Data (Recommended First Step)
+**Metals:** XAUUSD, XAGUSD
+
+**Forex Majors:** EURUSD, GBPUSD, USDJPY, USDCHF
+
+**Forex Minors:** EURGBP, EURJPY, GBPJPY, AUDUSD, NZDUSD, USDCAD, EURAUD, GBPCHF
+
+### 4. Set Up Database
+
+SQLite is used by default (`USE_SQLITE=true`). The system creates tables automatically on first run.
+
+For MySQL, set `USE_SQLITE=false` and configure:
+```env
+DB_HOST=127.0.0.1
+DB_PORT=3307
+DB_NAME=trading_ai
+DB_USER=root
+DB_PASSWORD=root
+```
+
+### 5. Backfill Historical Data (Recommended First Step)
 
 Train ML models immediately from historical data instead of waiting days:
 
 ```bash
-./run_backfill.sh --weeks 4 --step 1 --reset
+# MT5 or Capital.com (auto-detected from TRADING_PLATFORM)
+python -m trading_ai.backtest_historical --weeks 4 --step 1
+
+# Specific symbol
+python -m trading_ai.backtest_historical --symbol ETHUSD --weeks 4
+
+# Reset existing data first
+python -m trading_ai.backtest_historical --weeks 4 --reset
 ```
 
-This fetches weeks of candle data, replays it through the signal engine, verifies signals, and trains ML models. Takes ~2-5 minutes.
+This fetches weeks of candle data, replays it through the signal engine, verifies signals, and trains ML models. Takes ~2-5 minutes per symbol.
 
-### 5. Run Live
+### 6. Run Live
 
 ```bash
-./run.sh
-```
+# Single cycle
+python -m trading_ai.main
 
-Runs continuously, cycling every `RUN_INTERVAL` seconds.
+# Continuous loop
+python -m trading_ai.main --loop
+
+# With custom interval (seconds)
+python -m trading_ai.main --loop --interval 300
+```
 
 ---
 
@@ -202,10 +249,12 @@ Three strategies, used in cascade:
 
 ### Prediction Filter
 
-- ML model predicts probability that a rule-based signal will succeed
-- **Below threshold** (`ML_PREDICTION_THRESHOLD=0.3`): trade is BLOCKED
+- ML model predicts **probability** that a rule-based signal will succeed
+- **Below threshold** (`ML_PREDICTION_THRESHOLD`): trade is BLOCKED
 - **Above threshold**: trade is APPROVED
 - Before 50 verified signals: ML predictions are logged but don't block trades (not enough data to be reliable)
+
+**Note:** The threshold compares against **ML probability** (not adjusted confidence). The adjusted confidence displayed is: `rule_confidence × ML_probability`
 
 ---
 
@@ -246,38 +295,41 @@ Tracks **MFE** (Max Favorable Excursion) and **MAE** (Max Adverse Excursion) for
 
 ```bash
 # Single cycle
-python3 -m trading_ai.main
+python -m trading_ai.main
 
-# Continuous loop (reads RUN_INTERVAL from .env)
-./run.sh
+# Continuous loop
+python -m trading_ai.main --loop
+
+# Custom interval (seconds)
+python -m trading_ai.main --loop --interval 300
 ```
 
 ### Historical Backfill
 
 ```bash
 # Default: 4 weeks, every M5 candle
-python3 -m trading_ai.backtest_historical
+python -m trading_ai.backtest_historical
 
 # Options
---weeks 4          # Weeks of historical data
---step 1           # M5 candles per step (1=5min, 12=1hr)
---mode day_trading # Override trade mode
---symbol BTCUSD    # Specific symbol
---reset            # Clear existing signals & ML models first
+--weeks 4               # Weeks of historical data
+--step 1                # M5 candles per step (1=5min, 12=1hr)
+--mode day_trading      # Override trade mode
+--symbol ETHUSD         # Specific symbol
+--reset                 # Clear existing signals & ML models first
 
 # Examples
-./run_backfill.sh --weeks 2 --step 1 --reset
-./run_backfill.sh --symbol XAUUSD --mode scalping --reset
+python -m trading_ai.backtest_historical --weeks 4 --symbol ETHUSD
+python -m trading_ai.backtest_historical --symbol EURUSD --mode scalping --reset
 ```
 
 ### View Signals
 
 ```bash
 # Last 20 signals
-python3 -m trading_ai.signals_cmd
+python -m trading_ai.signals_cmd
 
 # Last 50 signals
-python3 -m trading_ai.signals_cmd 50
+python -m trading_ai.signals_cmd 50
 ```
 
 ---
@@ -287,55 +339,56 @@ python3 -m trading_ai.signals_cmd 50
 ```
 trading_ai/
 ├── main.py                     # Main orchestrator / prediction loop
-├── display.py                   # Rich terminal UI (panels, colors, emojis)
-├── backtest_historical.py       # Historical backfill script
-├── signals_cmd.py               # CLI to view signals from MySQL
-├── .env                         # Configuration (not committed)
-├── .env.example                 # Template
-├── requirements.txt             # 13 Python dependencies
-├── run.sh                       # Main loop runner
-├── run_backfill.sh              # Backfill runner
+├── display.py                  # Rich terminal UI (panels, colors, emojis)
+├── backtest_historical.py      # Historical backfill script (MT5 + Capital.com)
+├── signals_cmd.py              # CLI to view signals from database
+├── .env                        # Configuration (not committed)
+├── .env.example                # Template
+├── requirements.txt            # Python dependencies
+├── run.sh                      # Main loop runner
+├── run_backfill.sh             # Backfill runner
 │
 ├── config/
-│   └── settings.py              # Enums, dataclasses, .env loader
+│   └── settings.py             # Enums, dataclasses, .env loader
 │
 ├── data/
-│   ├── collector.py             # Capital.com REST API client
-│   ├── database.py              # SQLAlchemy engine & sessions
-│   └── models.py                # ORM: Candle, Signal, SignalVerification, MLModelMeta
+│   ├── collector.py            # Capital.com REST API client
+│   ├── mt5_client.py           # MetaTrader 5 client
+│   ├── database.py             # SQLAlchemy engine & sessions
+│   └── models.py               # ORM: Candle, Signal, SignalVerification, MLModelMeta
 │
 ├── indicators/
-│   ├── ema.py                   # EMA20, EMA50, EMA200
-│   ├── rsi.py                   # RSI14 (Wilder's smoothing)
-│   ├── macd.py                  # MACD 12/26/9
-│   ├── atr.py                   # ATR14 (Wilder's smoothing)
-│   └── features.py              # FeatureSet + compute_all_features assembler
+│   ├── ema.py                  # EMA20, EMA50, EMA200
+│   ├── rsi.py                  # RSI14 (Wilder's smoothing)
+│   ├── macd.py                 # MACD 12/26/9
+│   ├── atr.py                  # ATR14 (Wilder's smoothing)
+│   └── features.py             # FeatureSet + compute_all_features assembler
 │
 ├── signals/
-│   ├── scoring.py               # 6-factor weighted confidence scoring
-│   └── engine.py                # Multi-TF confluence engine (3 trade modes)
+│   ├── scoring.py              # 6-factor weighted confidence scoring
+│   └── engine.py               # Multi-TF confluence engine (3 trade modes)
 │
 ├── ml/
-│   ├── dataset.py                # Build training dataset from verified signals
-│   ├── trainer.py                # Train XGBoost/LightGBM/CatBoost
-│   ├── predictor.py             # Live ML prediction / filtering
-│   └── models/                  # Saved .joblib model files + _features.json
+│   ├── dataset.py              # Build training dataset from verified signals
+│   ├── trainer.py              # Train XGBoost/LightGBM/CatBoost
+│   ├── predictor.py            # Live ML prediction / filtering
+│   └── models/                 # Saved .joblib model files + _features.json
 │
 ├── backtesting/
-│   └── walk_forward.py          # Walk-forward validation (3 fallback strategies)
+│   └── walk_forward.py         # Walk-forward validation (3 fallback strategies)
 │
 ├── trade/
-│   └── executor.py              # Capital.com order placement & position management
+│   └── executor.py             # Unified order placement (MT5 + Capital.com)
 │
 └── verification/
-    └── verifier.py              # Signal outcome verification via future candles
+    └── verifier.py             # Signal outcome verification via future candles
 ```
 
 ---
 
 ## Database
 
-MySQL on `127.0.0.1:3307` (database: `trading_ai`).
+SQLite (`trading_ai.db`) by default, or MySQL on `127.0.0.1:3307`.
 
 ### Tables
 
@@ -344,11 +397,10 @@ MySQL on `127.0.0.1:3307` (database: `trading_ai`).
 | Column | Type | Notes |
 |--------|------|-------|
 | id | Integer PK | Auto-increment |
-| symbol | String(20) | XAUUSD / BTCUSD |
+| symbol | String(20) | XAUUSD / BTCUSD / ETHUSD / etc. |
 | timeframe | String(10) | 5m / 1h / 4h |
 | timestamp | DateTime | UTC |
-| open | Float | Mapped from `open_price` |
-| high / low / close | Float | |
+| open / high / low / close | Float | |
 | volume / spread | Float | Nullable |
 
 Unique constraint: `(symbol, timeframe, timestamp)`
@@ -360,7 +412,7 @@ Unique constraint: `(symbol, timeframe, timestamp)`
 | id | Integer PK | Auto-increment |
 | signal_id | String(64) | UUID |
 | symbol / timeframe / signal | String | BUY / SELL / NO_TRADE |
-| confidence | Float | 0–100% |
+| confidence | Float | 0–100% (rule-based) |
 | entry / stop_loss / take_profit | Float | Price levels |
 | timestamp | DateTime | When signal was generated |
 | 17 feature columns | Float | Snapshot at signal time |
@@ -391,7 +443,25 @@ Unique constraint: `(symbol, timeframe, timestamp)`
 
 ---
 
-## Capital.com API
+## Platform APIs
+
+### MetaTrader 5
+
+**Requirements:**
+- MT5 terminal installed and running
+- Account logged in
+- `pip install MetaTrader5`
+
+**Symbol Mapping:** Direct symbol names (XAUUSD, BTCUSD, ETHUSD, etc.)
+
+**Timeframe Mapping:**
+| Timeframe | MT5 Constant |
+|-----------|--------------|
+| M5 | `TIMEFRAME_M5` |
+| H1 | `TIMEFRAME_H1` |
+| H4 | `TIMEFRAME_H4` |
+
+### Capital.com
 
 ### Endpoints Used
 
@@ -412,21 +482,7 @@ Unique constraint: `(symbol, timeframe, timestamp)`
 |--------|------|
 | XAUUSD | `GOLD` |
 | BTCUSD | `BTCUSD` |
-
-### Timeframe → Resolution
-
-| Timeframe | API Code |
-|-----------|----------|
-| M1 | `MINUTE` |
-| M5 | `MINUTE_5` |
-| M15 | `MINUTE_15` |
-| H1 | `HOUR` |
-| H4 | `HOUR_4` |
-| D1 | `DAY` |
-
-### Date Format
-
-The `from` parameter uses ISO format: `2026-05-24T00:00:00`
+| ETHUSD | `ETHUSD` |
 
 ---
 
@@ -436,7 +492,6 @@ The `from` parameter uses ISO format: `2026-05-24T00:00:00`
 |---------|---------|---------|
 | pandas | ≥2.1 | DataFrames |
 | numpy | ≥1.26 | Numerical operations |
-| ta | ≥0.11 | Technical analysis (available, custom indicators used) |
 | xgboost | ≥2.0 | XGBoost classifier |
 | lightgbm | ≥4.1 | LightGBM classifier |
 | catboost | ≥1.2 | CatBoost classifier |
@@ -447,6 +502,7 @@ The `from` parameter uses ISO format: `2026-05-24T00:00:00`
 | requests | ≥2.31 | API calls |
 | python-dotenv | ≥1.0 | .env loading |
 | rich | ≥13.0 | Terminal formatting |
+| MetaTrader5 | ≥5.0 | MT5 support |
 
 ---
 
@@ -455,28 +511,34 @@ The `from` parameter uses ISO format: `2026-05-24T00:00:00`
 ```
 ──────────────────────────────────── BTCUSD ────────────────────────────────────
 
-  Candles  +1 5m · 0 1h · 0 4h
+  New candles  +1 5m · 0 1h · 0 4h
+  Loaded candles  500 5m · 500 1h · 500 4h
   Verified  0 signals · 4 pending (need more data)
 
 ╭─────────────────────────── Signal ───────────────────────────╮
-│  📈 BUY  BTCUSD  confidence=50.2%                           │
-│  Entry  73,877.10    SL  73,681.10                          │
-│  TP     74,171.09    R:R 1:1.5                              │
+│  📈 BUY  BTCUSD  confidence=81.6%                          │
+│  Entry  73,098.00    SL  73,380.38                          │
+│  TP     72,674.43    R:R 1:1.5                              │
 │  Mode    day_trading                                         │
 ╰──────────────────────────────────────────────────────────────╯
 
 ╭─────────────────────── ML Prediction ────────────────────────╮
-│  catboost_v1  ·  probability 56.4%                          │
+│  catboost_v3  ·  ML prob 66.1%  →  adj. confidence 54.0%    │
 │  ✅ APPROVED  above 30% threshold                           │
 ╰──────────────────────────────────────────────────────────────╯
 
-  🔄 Auto-train  28 verified · last trained on 28 — skipping
+╭─────────────────────── Trade Placed ────────────────────────╮
+│  ✅ BUY  BTCUSD  size=0.01                                  │
+│  SL  73,363.38  TP  72,657.43                               │
+│  Ref  407975262                                             │
+╰──────────────────────────────────────────────────────────────╯
+
+  🔄 Auto-train  69 verified · last trained on 69 — skipping
 
 ╭─────────────────────── Cycle Summary ───────────────────────╮
 │  📈 BUY BTCUSD                                              │
-│     Entry 73,877.10  SL 73,681.10  TP 74,171.09            │
-│  🤖 ML: 56.4% → Approved                                    │
-│  ⏭  Trade skipped                                           │
+│     Entry 73,098.00  SL 73,380.38  TP 72,674.43            │
+│  ✅ Trade placed                                            │
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
@@ -484,7 +546,7 @@ The `from` parameter uses ISO format: `2026-05-24T00:00:00`
 
 ## Backfill Results
 
-First run on BTCUSD with 3.5 days of M5 data:
+First run on BTCUSD with 4 weeks of M5 data:
 
 ```
 ╭────────────────────── Backfill Summary ──────────────────────╮
@@ -522,6 +584,8 @@ First run on BTCUSD with 3.5 days of M5 data:
 | `train_signal_count` in meta | Prevents re-training every cycle when no new data |
 | Rich terminal output | Color-coded panels make decisions instantly visible |
 | Historical backfill | Train ML in minutes from old data instead of waiting weeks |
+| Dual platform support | Works with both MT5 and Capital.com |
+| Multi-symbol support | Trade crypto, metals, and forex pairs |
 
 ---
 
@@ -531,26 +595,23 @@ First run on BTCUSD with 3.5 days of M5 data:
 
 ```bash
 # 1. Backfill historical data and train ML
-./run_backfill.sh --weeks 4 --step 1 --reset
+python -m trading_ai.backtest_historical --weeks 4 --step 1 --reset
 
 # 2. Run live trading
-./run.sh
+python -m trading_ai.main --loop
 ```
 
-### Check Current State
+### Add a New Symbol
 
 ```bash
-# View recent signals
-python3 -m trading_ai.signals_cmd
+# 1. Edit .env
+SYMBOLS=BTCUSD,XAUUSD,ETHUSD
 
-# Check ML models
-python3 -c "
-from trading_ai.data.database import get_session
-from trading_ai.data.models import MLModelMeta
-s = next(get_session())
-for m in s.query(MLModelMeta).filter(MLModelMeta.is_active == True).all():
-    print(f'{m.model_type} v{m.version} {m.symbol} auc={m.roc_auc}')
-"
+# 2. Backfill the new symbol
+python -m trading_ai.backtest_historical --symbol ETHUSD --weeks 4
+
+# 3. Run live (all symbols)
+python -m trading_ai.main --loop
 ```
 
 ### Switch Trade Mode
@@ -560,30 +621,30 @@ for m in s.query(MLModelMeta).filter(MLModelMeta.is_active == True).all():
 TRADE_MODE=scalping   # or day_trading, swing
 
 # Re-backfill with new mode and retrain
-./run_backfill.sh --mode scalping --reset
+python -m trading_ai.backtest_historical --mode scalping --reset
 
 # Run live
-./run.sh
+python -m trading_ai.main --loop
 ```
 
-### Add a New Symbol
+### Switch Between MT5 and Capital.com
 
 ```bash
-# 1. Edit .env
-SYMBOLS=XAUUSD,BTCUSD
-TRADE_SIZE_XAUUSD=0.01
+# Edit .env
+TRADING_PLATFORM=MT5        # or CAPITAL
 
-# 2. Backfill the new symbol
-./run_backfill.sh --symbol XAUUSD --reset
+# Edit symbols if needed
+SYMBOLS=BTCUSD,ETHUSD       # MT5 supports more symbols
 
-# 3. Run live (both symbols)
-./run.sh
+# Backfill and run
+python -m trading_ai.backtest_historical --weeks 4
+python -m trading_ai.main --loop
 ```
 
 ### Reset Everything
 
 ```bash
-./run_backfill.sh --reset --weeks 4
+python -m trading_ai.backtest_historical --reset --weeks 4
 ```
 
 This clears all signals, verifications, and ML models, then rebuilds from scratch.

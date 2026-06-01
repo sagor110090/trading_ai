@@ -23,9 +23,15 @@ def get_engine():
         use_sqlite = os.getenv("USE_SQLITE", "true").lower() == "true"
 
         if use_sqlite:
-            # Use SQLite
+            # Use SQLite - always use absolute path from project root
+            # Get the trading_ai package root (2 levels up from data/database.py)
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            db_path = os.getenv("SQLITE_DB_PATH", os.path.join(project_root, "trading_ai.db"))
+            db_path_env = os.getenv("SQLITE_DB_PATH", "trading_ai.db")
+            # Make path absolute relative to project root if not already absolute
+            if not os.path.isabs(db_path_env):
+                db_path = os.path.abspath(os.path.join(project_root, db_path_env))
+            else:
+                db_path = db_path_env
             url = f"sqlite:///{db_path}"
             logger.info(f"Using SQLite database: {db_path}")
         else:
