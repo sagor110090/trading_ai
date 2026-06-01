@@ -30,6 +30,7 @@ from trading_ai.display import (
     display_cycle_summary,
     display_duplicate_signal,
     display_ml_prediction,
+    display_missing_confluence_data,
     display_no_ml_model,
     display_no_signal,
     display_position_reversed,
@@ -264,6 +265,7 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
 
         # ── 1. Fetch and store candles ──────────────────────────────────
         candle_results: dict[str, int] = {}
+        loaded_counts: dict[str, int] = {}
         for timeframe in SETTINGS.timeframes:
             try:
                 df = client.fetch_candles(symbol, timeframe, limit=500)
@@ -277,8 +279,9 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
             new_count = _store_candles(df, symbol.value, timeframe.value)
             candle_results[timeframe.value] = new_count
             fetched[timeframe.value] = _load_candles_from_db(symbol.value, timeframe.value, limit=500)
+            loaded_counts[timeframe.value] = len(fetched[timeframe.value])
 
-        display_candle_fetch(candle_results)
+        display_candle_fetch(candle_results, loaded_counts)
 
         # ── 2. Verify pending signals ────────────────────────────────────
         verified = verify_pending_signals(symbol.value)
@@ -344,9 +347,28 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
                     stats["signal"] = trade_signal
                     display_signal(trade_signal)
 
+                    # ── ML prediction (even for duplicates) ─────────────
+                    should_trade = True
+                    prediction = predict_signal(trade_signal)
+                    if prediction:
+                        stats["ml_prediction"] = prediction
+                        if prediction.probability < SETTINGS.ml.prediction_threshold:
+                            should_trade = False
+                            stats["ml_blocked"] = True
+                            display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=True)
+                        else:
+                            stats["ml_approved"] = True
+                            display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=False)
+                    else:
+                        stats["no_ml"] = True
+                        display_no_ml_model()
+
                     # Even for duplicates, check if we should reverse
-                    if SETTINGS.auto_trade:
+                    if SETTINGS.auto_trade and should_trade:
                         _handle_trade_decision(client, trade_signal, position_manager, stats)
+                    elif SETTINGS.auto_trade and not should_trade:
+                        display_trade_blocked("ML filter")
+                        stats["trade_blocked"] = True
 
                     _try_auto_train(symbol.value, stats)
                     display_cycle_summary(stats)
@@ -384,6 +406,7 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
                 display_no_signal(symbol.value)
         else:
             logger.warning("Missing H4 or H1 data for confluence check on %s", symbol.value)
+            display_missing_confluence_data(symbol.value, len(df_h4), len(df_h1), len(df_m5))
 
         # ── 5. Auto-train ───────────────────────────────────────────────
         _try_auto_train(symbol.value, stats)

@@ -91,7 +91,7 @@ def generate_walk_forward_folds(
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     # Convert timestamp strings to datetime objects
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
 
     # Determine time range
     start_date = df["timestamp"].min()

@@ -6,8 +6,34 @@ from typing import Final
 
 
 class Symbol(str, Enum):
-    XAUUSD = "XAUUSD"
+    # Crypto
     BTCUSD = "BTCUSD"
+    ETHUSD = "ETHUSD"
+    LTCUSD = "LTCUSD"
+    BCHUSD = "BCHUSD"
+    XRPUSD = "XRPUSD"
+    BTCEUR = "BTCEUR"
+    ETHGBP = "ETHGBP"
+
+    # Metals
+    XAUUSD = "XAUUSD"
+    XAGUSD = "XAGUSD"
+
+    # Forex Majors
+    EURUSD = "EURUSD"
+    GBPUSD = "GBPUSD"
+    USDJPY = "USDJPY"
+    USDCHF = "USDCHF"
+
+    # Forex Minors
+    EURGBP = "EURGBP"
+    EURJPY = "EURJPY"
+    GBPJPY = "GBPJPY"
+    AUDUSD = "AUDUSD"
+    NZDUSD = "NZDUSD"
+    USDCAD = "USDCAD"
+    EURAUD = "EURAUD"
+    GBPCHF = "GBPCHF"
 
 
 class Timeframe(str, Enum):

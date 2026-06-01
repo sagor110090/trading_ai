@@ -36,15 +36,40 @@ def display_cycle_header(symbol: str) -> None:
 # ── Candle Fetch ──────────────────────────────────────────────────────────
 
 
-def display_candle_fetch(results: dict[str, int]) -> None:
-    """Show candle fetch results. results = {timeframe: new_count}."""
-    parts = []
+def display_candle_fetch(results: dict[str, int], loaded: Optional[dict[str, int]] = None) -> None:
+    """Show candle fetch results.
+
+    Args:
+        results: {timeframe: new_count_inserted}
+        loaded: Optional {timeframe: total_count_loaded_from_db}
+    """
+    saved_parts = []
+    loaded_parts = []
+
     for tf, count in results.items():
         if count > 0:
-            parts.append(f"[green]+{count}[/] [dim]{tf}[/]")
+            saved_parts.append(f"[green]+{count}[/] [dim]{tf}[/]")
         else:
-            parts.append(f"[dim]0 {tf}[/]")
-    console.print(f"  [dim]Candles[/]  {' · '.join(parts)}")
+            saved_parts.append(f"[dim]0 {tf}[/]")
+
+        if loaded is not None:
+            loaded_count = loaded.get(tf, 0)
+            if loaded_count > 0:
+                loaded_parts.append(f"[cyan]{loaded_count}[/] [dim]{tf}[/]")
+            else:
+                loaded_parts.append(f"[red]0[/] [dim]{tf}[/]")
+
+    console.print(f"  [dim]New candles[/]  {' · '.join(saved_parts)}")
+    if loaded is not None:
+        console.print(f"  [dim]Loaded candles[/]  {' · '.join(loaded_parts)}")
+
+
+def display_missing_confluence_data(symbol: str, h4_count: int, h1_count: int, m5_count: int) -> None:
+    """Show that signal generation was skipped because candle data is missing."""
+    console.print(
+        f"  [yellow]Missing candle data for {symbol}:[/] "
+        f"[dim]H4={h4_count} H1={h1_count} M5={m5_count}[/]"
+    )
 
 
 # ── Verification ──────────────────────────────────────────────────────────

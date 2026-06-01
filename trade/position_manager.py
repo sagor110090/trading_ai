@@ -32,6 +32,7 @@ from trading_ai.trade.executor import (
     get_open_positions,
     should_update_sl,
     update_position_sl_tp,
+    update_position_sl_tp_unified,
     get_open_positions_unified,
     has_open_position_unified,
     place_trade_unified,
@@ -255,12 +256,6 @@ class PositionManager:
 
         if decision.action == "update_sl_tp":
             # Same direction — update SL and TP on the existing position
-            # Note: SL/TP updates only supported on Capital.com currently
-            if SETTINGS.trading_platform == TradingPlatform.MT5:
-                result["success"] = True
-                result["reason"] = "SL/TP updates not supported on MT5 yet"
-                return result
-
             pos = decision.existing_position
             new_sl = decision.new_sl
             new_tp = decision.new_tp
@@ -268,8 +263,7 @@ class PositionManager:
             # Safety check: is the new SL safe to apply?
             is_safe, reason = should_update_sl(
                 direction=pos.direction,
-                current_sl=pos.level,  # We don't have the original SL from the position,
-                                       # so we use entry price as baseline
+                current_sl=pos.stop_level if pos.stop_level is not None else pos.level,
                 new_sl=new_sl,
                 entry_price=pos.level,
             )
@@ -282,7 +276,7 @@ class PositionManager:
                 return result
 
             # Try to update the position on the broker
-            update_result = update_position_sl_tp(
+            update_result = update_position_sl_tp_unified(
                 self.client, pos,
                 new_sl=new_sl,
                 new_tp=new_tp,
