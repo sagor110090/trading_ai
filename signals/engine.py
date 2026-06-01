@@ -136,6 +136,7 @@ def generate_signal_scalping(
     df_m5: pd.DataFrame,
     symbol: Symbol,
     live_price: Optional[float] = None,
+    prefix: str = "",
 ) -> Optional[TradeSignal]:
     """Scalping signal: M5 entry in direction of H1 trend.
 
@@ -193,7 +194,7 @@ def generate_signal_scalping(
     )
 
     return TradeSignal(
-        signal_id=uuid.uuid4().hex[:16],
+        signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
         symbol=symbol.value,
         timeframe=cfg.entry_timeframe,
         signal=h1_dir,
@@ -220,6 +221,7 @@ def generate_signal_day_trading(
     df_m5: pd.DataFrame,
     symbol: Symbol,
     live_price: Optional[float] = None,
+    prefix: str = "",
 ) -> Optional[TradeSignal]:
     """Day trading signal: M5 entry in H1 trend direction, H4 must not contradict.
 
@@ -291,7 +293,7 @@ def generate_signal_day_trading(
     )
 
     return TradeSignal(
-        signal_id=uuid.uuid4().hex[:16],
+        signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
         symbol=symbol.value,
         timeframe=cfg.entry_timeframe,
         signal=h1_dir,
@@ -318,6 +320,7 @@ def generate_signal_swing(
     df_m5: pd.DataFrame,
     symbol: Symbol,
     live_price: Optional[float] = None,
+    prefix: str = "",
 ) -> Optional[TradeSignal]:
     """Swing signal: H4+H1 must agree, M5 entry trigger.
 
@@ -384,7 +387,7 @@ def generate_signal_swing(
     )
 
     return TradeSignal(
-        signal_id=uuid.uuid4().hex[:16],
+        signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
         symbol=symbol.value,
         timeframe="confluence",
         signal=signal_dir,
@@ -412,22 +415,24 @@ def generate_signal(
     symbol: Symbol,
     mode: Optional[TradeMode] = None,
     live_price: Optional[float] = None,
+    prefix: str = "",
 ) -> Optional[TradeSignal]:
     """Generate signal based on the active trade mode.
 
     Args:
         live_price: Current market price. If provided, used as entry instead
             of the last candle close, so SL/TP reflect live conditions.
+        prefix: Prefix for signal_id (e.g., "live_", "backtest_") to distinguish sources.
     """
     if mode is None:
         mode = SETTINGS.trade_mode
 
     if mode == TradeMode.SCALPING:
-        return generate_signal_scalping(df_h1, df_m5, symbol, live_price=live_price)
+        return generate_signal_scalping(df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
     elif mode == TradeMode.DAY_TRADING:
-        return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol, live_price=live_price)
+        return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
     elif mode == TradeMode.SWING:
-        return generate_signal_swing(df_h4, df_h1, df_m5, symbol, live_price=live_price)
+        return generate_signal_swing(df_h4, df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
     else:
         logger.error("Unknown trade mode: %s", mode)
         return None

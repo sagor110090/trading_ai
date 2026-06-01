@@ -433,7 +433,7 @@ def backfill_signals(
             # ── Generate signal at this historical point ──
             try:
                 trade_signal = generate_signal(
-                    df_h4_slice, df_h1_slice, df_m5_slice, symbol, mode
+                    df_h4_slice, df_h1_slice, df_m5_slice, symbol, mode, prefix="backtest_"
                 )
             except Exception as e:
                 logger.debug("Signal error at %s: %s", m5_ts, e)

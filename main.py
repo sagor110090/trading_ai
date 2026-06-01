@@ -335,6 +335,7 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
         if not df_h4.empty and not df_h1.empty:
             trade_signal = generate_signal(
                 df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode, live_price=live_price,
+                prefix="live_",
             )
 
             if trade_signal:
@@ -366,7 +367,10 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
 
                     # Even for duplicates, check if we should reverse
                     if SETTINGS.auto_trade and should_trade:
-                        _handle_trade_decision(client, trade_signal, position_manager, stats)
+                        trade_placed = _handle_trade_decision(client, trade_signal, position_manager, stats)
+                        # Only save the signal if a new trade was actually placed
+                        if trade_placed:
+                            _store_signal(trade_signal)
                     elif SETTINGS.auto_trade and not should_trade:
                         display_trade_blocked("ML filter")
                         stats["trade_blocked"] = True
@@ -376,7 +380,11 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
                     display_cycle_summary(stats)
                     continue
 
-                _store_signal(trade_signal)
+                # Only save signal to database if NOT in auto-trade mode
+                # In auto-trade mode, signals are only saved AFTER a trade is placed
+                # This prevents false "wins" in verification for signals that never executed
+                if not SETTINGS.auto_trade:
+                    _store_signal(trade_signal)
                 display_signal(trade_signal)
                 stats["signal_generated"] = True
                 stats["signal"] = trade_signal
@@ -423,14 +431,16 @@ def _handle_trade_decision(
     trade_signal: TradeSignal,
     position_manager: PositionManager,
     stats: dict,
-) -> None:
+) -> bool:
     """Evaluate and execute a trade based on position state.
 
+    Returns True if a NEW trade was placed, False otherwise.
+
     Handles four scenarios:
-    1. No position, no cooldown → place new trade
-    2. Same direction position → UPDATE SL/TP (trail the stop)
-    3. Opposite direction position → close old, place new (reversal)
-    4. Cooldown active → skip
+    1. No position, no cooldown → place new trade (returns True)
+    2. Same direction position → UPDATE SL/TP (trail the stop) (returns False)
+    3. Opposite direction position → close old, place new (reversal) (returns True)
+    4. Cooldown active → skip (returns False)
     """
     from trading_ai.trade.executor import OrderResult
 
@@ -458,13 +468,13 @@ def _handle_trade_decision(
                 f"  [yellow]⏭  SL update skipped:[/] {result.get('reason', 'unknown')}"
             )
             stats["trade_skipped"] = True
-        return
+        return False  # No new trade placed
 
     if decision.action == "skip_cooldown":
         # Cooldown active after a loss/timeout
         display_trade_skipped_cooldown(trade_signal.symbol, decision.cooldown_remaining_minutes)
         stats["trade_cooldown"] = True
-        return
+        return False  # No new trade placed
 
     if decision.action == "reverse_and_place":
         # Close existing position, then place new one
@@ -480,7 +490,7 @@ def _handle_trade_decision(
                 f"  [red]✗ Failed to close position:[/] {close_result.error}"
             )
             stats["trade_failed"] = True
-            return
+            return False  # No new trade placed
 
         # Register the closed position
         position_manager.register_closed(trade_signal.symbol, "reversal")
@@ -497,8 +507,12 @@ def _handle_trade_decision(
         result = place_trade_unified(client, trade_signal, size=size)
 
         if result.success:
+            # Save signal to database ONLY when a new trade is actually placed
+            # This prevents verification errors for signals that never executed
+            _store_signal(trade_signal)
             display_trade_placed(result)
             stats["trade_placed"] = True
+            return True  # New trade placed
         else:
             if "already exists" in (result.error or "").lower():
                 display_trade_skipped_existing(trade_signal.symbol)
@@ -506,6 +520,9 @@ def _handle_trade_decision(
             else:
                 display_trade_failed(result)
                 stats["trade_failed"] = True
+            return False  # No new trade placed
+
+    return False  # Default: no new trade placed
 
 
 def _apply_profit_trailing(
