@@ -149,9 +149,25 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
 
 
 def _store_signal(trade_signal: TradeSignal) -> Signal:
-    """Persist a trade signal to the database."""
+    """Persist a trade signal to the database.
+
+    If a signal with the same signal_id already exists (same candle
+    reprocessed in a later cycle), the existing row is returned silently.
+    """
+    from sqlalchemy.exc import IntegrityError
+
     session_gen = get_session()
     session = next(session_gen)
+
+    # Check if already stored (same signal_id from a previous cycle)
+    existing = (
+        session.query(Signal)
+        .filter(Signal.signal_id == trade_signal.signal_id)
+        .first()
+    )
+    if existing:
+        logger.debug("Signal %s already in DB, skipping insert", trade_signal.signal_id[:8])
+        return existing
 
     features = trade_signal.features.to_dict()
 
@@ -189,6 +205,15 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
 
     try:
         session.commit()
+    except IntegrityError:
+        session.rollback()
+        logger.debug("Signal %s duplicate on commit, skipping", trade_signal.signal_id[:8])
+        existing = (
+            session.query(Signal)
+            .filter(Signal.signal_id == trade_signal.signal_id)
+            .first()
+        )
+        return existing
     except Exception:
         session.rollback()
         raise

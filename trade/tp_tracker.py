@@ -243,8 +243,14 @@ class TPProgressTracker:
         take_profit: float,
         size: float,
         opened_at: datetime = None,
+        deal_id: str = None,
     ) -> TPProgress:
-        """Add a new position to track."""
+        """Add a new position to track.
+
+        If `deal_id` is provided, it is used as the tracker key so that
+        multiple positions on the same symbol/direction don't collide.
+        Otherwise, falls back to `symbol_direction`.
+        """
         if opened_at is None:
             opened_at = datetime.now(timezone.utc)
 
@@ -258,13 +264,12 @@ class TPProgressTracker:
             opened_at=opened_at,
         )
 
-        # Use symbol-direction as key (only one position per symbol-direction pair)
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         self.active_trades[key] = tracker
 
         logger.info(
-            "Tracking TP progress: %s %s entry=%.2f SL=%.2f TP=%.2f",
-            direction, symbol, entry_price, stop_loss, take_profit,
+            "Tracking TP progress: %s %s entry=%.2f SL=%.2f TP=%.2f (key=%s)",
+            direction, symbol, entry_price, stop_loss, take_profit, key,
         )
 
         return tracker
@@ -276,13 +281,14 @@ class TPProgressTracker:
         current_price: float,
         high: float = None,
         low: float = None,
+        deal_id: str = None,
     ) -> Optional[dict]:
         """Update a tracked position with current price data.
 
         Returns:
             Update result dict, or None if position not found.
         """
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         tracker = self.active_trades.get(key)
 
         if tracker is None:
@@ -295,9 +301,10 @@ class TPProgressTracker:
         symbol: str,
         direction: str,
         current_price: float,
+        deal_id: str = None,
     ) -> tuple[bool, str]:
         """Check if we should evaluate trade strength for this position."""
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         tracker = self.active_trades.get(key)
 
         if tracker is None:
@@ -313,9 +320,10 @@ class TPProgressTracker:
         decision: str,
         reason: str,
         components: dict = None,
+        deal_id: str = None,
     ) -> None:
         """Record a strength score evaluation for a position."""
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         tracker = self.active_trades.get(key)
 
         if tracker is None:
@@ -336,15 +344,17 @@ class TPProgressTracker:
         direction: str,
         exit_price: float,
         reason: str,
+        deal_id: str = None,
     ) -> Optional[dict]:
         """Close a tracked position and return final stats."""
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         tracker = self.active_trades.get(key)
 
         if tracker is None:
             return None
 
         result = tracker.close(exit_price, reason)
+        result["deal_id"] = key
         del self.active_trades[key]
 
         logger.info(
@@ -354,14 +364,18 @@ class TPProgressTracker:
 
         return result
 
-    def get_position(self, symbol: str, direction: str) -> Optional[TPProgress]:
+    def get_position(self, symbol: str, direction: str, deal_id: str = None) -> Optional[TPProgress]:
         """Get a tracked position."""
-        key = f"{symbol}_{direction}"
+        key = deal_id if deal_id else f"{symbol}_{direction}"
         return self.active_trades.get(key)
 
     def get_all_positions(self) -> list[TPProgress]:
         """Get all tracked positions."""
         return list(self.active_trades.values())
+
+    def get_tracked_keys(self) -> list[str]:
+        """Return all current tracker keys (deal_ids or symbol_direction)."""
+        return list(self.active_trades.keys())
 
     def remove_position(self, symbol: str, direction: str) -> bool:
         """Remove a position from tracking without closing it."""

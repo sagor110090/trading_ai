@@ -66,13 +66,16 @@ class PositionMonitor:
         """Sync tracked positions with broker's open positions.
 
         Adds new positions to tracker and removes closed ones.
+        Uses broker deal_id/ticket as the unique key so that a new trade
+        opened after a TP hit gets a fresh tracker (instead of reusing the
+        old position's MFE/MAE/strength history).
         """
         broker_positions = get_open_positions_unified(self.client)
-        tracked_keys = {f"{p.symbol}_{p.direction}" for p in self.tp_tracker.get_all_positions()}
+        tracked_keys = set(self.tp_tracker.get_tracked_keys())
         broker_keys = set()
 
         for pos in broker_positions:
-            key = f"{pos.epic}_{pos.direction}"
+            key = str(pos.deal_id)
             broker_keys.add(key)
 
             # Skip if already tracking
@@ -88,23 +91,30 @@ class PositionMonitor:
                 take_profit=pos.profit_level if pos.profit_level else pos.level * 1.01,
                 size=pos.size,
                 opened_at=datetime.now(timezone.utc),
+                deal_id=key,
             )
             logger.info(
-                "Started tracking: %s %s entry=%.2f SL=%.2f TP=%.2f",
-                pos.direction, pos.epic, pos.level, pos.stop_level, pos.profit_level,
+                "Started tracking: %s %s entry=%.2f SL=%.2f TP=%.2f (deal_id=%s)",
+                pos.direction, pos.epic, pos.level, pos.stop_level, pos.profit_level, key,
             )
 
-        # Remove positions that are no longer open
+        # Remove positions that are no longer open (TP hit, SL hit, closed externally)
         for key in tracked_keys - broker_keys:
-            symbol, direction = key.split("_")
-            # Try to get exit reason from database or mark as unknown
+            tracker = self.tp_tracker.active_trades.get(key)
+            if tracker is None:
+                continue
             final_stats = self.tp_tracker.close_position(
-                symbol, direction,
+                tracker.symbol, tracker.direction,
                 exit_price=0,  # Unknown - position closed externally
                 reason="external_close",
+                deal_id=key,
             )
             if final_stats:
                 self._log_trade(final_stats)
+            logger.info(
+                "Stopped tracking (external close): key=%s %s %s",
+                key, tracker.direction, tracker.symbol,
+            )
 
         self._synced_with_broker = True
 
@@ -122,8 +132,10 @@ class PositionMonitor:
         Returns:
             List of MonitorDecision for each position checked.
         """
-        if not self._synced_with_broker:
-            self.sync_positions()
+        # Re-sync every call so newly opened / closed positions are reflected.
+        # sync_positions() is cheap (one broker query + dict diff) and runs
+        # every 60s from the background monitor thread.
+        self.sync_positions()
 
         decisions = []
         broker_positions = get_open_positions_unified(self.client)
@@ -192,29 +204,36 @@ class PositionMonitor:
                 direction=pos.direction,
             )
 
+        # Use broker deal_id/ticket as the unique tracker key
+        deal_id = str(pos.deal_id)
+
         # Update TP tracker
         update_result = self.tp_tracker.update_position(
             pos.epic, pos.direction, current_price,
+            deal_id=deal_id,
         )
 
-        tp_progress = update_result.get("progress", 0.0)
-        # Use actual MT5 profit instead of calculating
+        tp_progress = update_result.get("progress", 0.0) if update_result else 0.0
+        # Use actual broker profit instead of calculating
         pnl = pos.upl
 
         # Check if we should evaluate strength
         should_eval, eval_reason = self.tp_tracker.should_evaluate_strength(
             pos.epic, pos.direction, current_price,
+            deal_id=deal_id,
         )
 
         # Also force evaluation if TP is above 60% but no strength score recorded
-        force_eval = (tp_progress >= 0.60 and
-                     len(self.tp_tracker.get_position(pos.epic, pos.direction).strength_scores) == 0
-                     if self.tp_tracker.get_position(pos.epic, pos.direction) else False)
+        tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
+        force_eval = (
+            tp_progress >= 0.60 and tracked is not None
+            and len(tracked.strength_scores) == 0
+        )
 
         if should_eval or force_eval:
             logger.info(
-                "Evaluating strength: %s %s - TP: %.1f%% (should_eval=%s, force_eval=%s, df_provider=%s)",
-                pos.direction, pos.epic, tp_progress * 100, should_eval, force_eval, df_provider is not None,
+                "Evaluating strength: %s %s - TP: %.1f%% (should_eval=%s, force_eval=%s, df_provider=%s, deal_id=%s)",
+                pos.direction, pos.epic, tp_progress * 100, should_eval, force_eval, df_provider is not None, deal_id,
             )
 
         if (should_eval or force_eval) and df_provider:
@@ -233,6 +252,7 @@ class PositionMonitor:
                     decision=strength_result.decision,
                     reason=strength_result.reason,
                     components=components_dict,
+                    deal_id=deal_id,
                 )
 
                 # Make decision based on strength
@@ -353,6 +373,7 @@ class PositionMonitor:
                 pos.epic, pos.direction,
                 exit_price=close_result.close_level or pos.level,
                 reason=f"strength_exit:{decision.reason[:50]}",
+                deal_id=str(pos.deal_id),
             )
 
             if final_stats:
