@@ -252,7 +252,6 @@ class Settings:
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
-    trailing_stop_enabled: bool = True
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
 
     def get_trade_size(self, symbol: str) -> float:
@@ -330,7 +329,6 @@ def load_settings() -> Settings:
         symbols = (Symbol.BTCUSD,)
 
     auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
-    trailing_stop_enabled = os.getenv("TRAILING_STOP_ENABLED", "true").lower() == "true"
 
     # Read all TRADE_SIZE_<SYMBOL> from env
     trade_sizes = {"DEFAULT": float(os.getenv("TRADE_SIZE_DEFAULT", "0.01"))}
@@ -355,7 +353,6 @@ def load_settings() -> Settings:
         ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold, auto_train=auto_train),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
-        trailing_stop_enabled=trailing_stop_enabled,
         trade_sizes=trade_sizes,
         symbols=symbols,
         log_level=os.getenv("LOG_LEVEL", "INFO"),

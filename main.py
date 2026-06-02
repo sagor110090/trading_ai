@@ -49,11 +49,11 @@ from trading_ai.ml.predictor import Prediction, predict_signal
 from trading_ai.signals.engine import TradeSignal, generate_signal
 from trading_ai.trade.executor import (
     close_position_unified,
-    get_trailing_stop_candidate,
     place_trade_unified,
-    update_position_sl_tp_unified,
 )
 from trading_ai.trade.position_manager import PositionManager
+from trading_ai.trade.position_monitor import PositionMonitor
+from rich.panel import Panel
 from trading_ai.verification.verifier import verify_pending_signals
 
 logger = logging.getLogger(__name__)
@@ -224,7 +224,123 @@ def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.D
     return pd.DataFrame(rows)
 
 
-def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager) -> None:
+def _check_position_strength(
+    client: CapitalComClient,
+    position_monitor: PositionMonitor,
+    position_manager: PositionManager,
+) -> None:
+    """Check all open positions for TP progress and strength.
+
+    Evaluates:
+    - TP progress (if >= 60%, evaluate strength)
+    - Trade strength score
+    - Close position if score < 50
+
+    Also logs decisions to the trade log database.
+    """
+    from trading_ai.indicators.features import compute_all_features
+    from trading_ai.display import display_position_strength_exit
+    from rich.table import Table
+
+    def df_provider(symbol: str, timeframe: str) -> pd.DataFrame:
+        """Provider function to get DataFrame for strength scoring."""
+        try:
+            df = client.fetch_candles(symbol, timeframe, limit=100)
+            if df.empty:
+                return pd.DataFrame()
+            df = compute_all_features(df)
+            return df
+        except Exception as e:
+            logger.error("Failed to fetch data for strength check: %s", e)
+            return pd.DataFrame()
+
+    # Check all positions
+    decisions = position_monitor.check_all_positions(df_provider=df_provider)
+
+    # Display results in a table
+    if decisions:
+        table = Table(title="[bold cyan]Position Monitor[/]", show_header=True, header_style="bold magenta")
+        table.add_column("Symbol", style="cyan", width=10)
+        table.add_column("Dir", style="cyan", width=4)
+        table.add_column("TP Progress", justify="right", width=12)
+        table.add_column("P&L", justify="right", width=10)
+        table.add_column("Strength", justify="right", width=8)
+        table.add_column("Status", style="bold", width=10)
+
+        has_close = False
+
+        for decision in decisions:
+            if decision.action == "close":
+                has_close = True
+                table.add_row(
+                    decision.symbol[:10],
+                    decision.direction[:4],
+                    f"[red]{decision.tp_progress:.1%}[/]",
+                    f"[red]{decision.pnl or 0:+.2f}[/]",
+                    f"[red]{decision.strength_score or 0:.1f}[/]",
+                    "[red]CLOSED[/]",
+                )
+                # Register the close with position manager
+                position_manager.register_closed(decision.symbol, "strength_exit")
+            elif decision.action == "hold":
+                if decision.strength_score is not None:
+                    # Strength was evaluated
+                    if decision.strength_score >= 70:
+                        status = "HOLD"
+                        style = "[green]"
+                    elif decision.strength_score >= 50:
+                        status = "MONITOR"
+                        style = "[yellow]"
+                    else:
+                        status = "WEAK"
+                        style = "[red]"
+                else:
+                    # Just tracking TP progress
+                    status = "TRACK"
+                    style = "[dim]"
+
+                progress_color = "[green]" if decision.tp_progress >= 0.6 else "[yellow]" if decision.tp_progress >= 0.3 else "[dim]"
+                pnl_color = "[green]" if (decision.pnl or 0) > 0 else "[red]" if (decision.pnl or 0) < 0 else "[dim]"
+
+                table.add_row(
+                    decision.symbol[:10],
+                    decision.direction[:4],
+                    f"{progress_color}{decision.tp_progress:.1%}[/]",
+                    f"{pnl_color}{decision.pnl or 0:+.2f}[/]",
+                    f"{decision.strength_score:.1f}" if decision.strength_score is not None else "N/A",
+                    f"{style}{status}[/]",
+                )
+            elif decision.action == "error":
+                table.add_row(
+                    "ERROR",
+                    "",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                    f"[red]{decision.reason[:15]}...[/]",
+                )
+
+        console.print(table)
+
+        # Also show individual close panels for positions that were closed
+        if has_close:
+            for decision in decisions:
+                if decision.action == "close":
+                    display_position_strength_exit(
+                        symbol=decision.symbol,
+                        direction=decision.direction,
+                        tp_progress=decision.tp_progress,
+                        strength_score=decision.strength_score or 0,
+                        pnl=decision.pnl or 0,
+                        reason=decision.reason,
+                    )
+
+
+def run_signal_cycle(
+    client: CapitalComClient,
+    position_manager: PositionManager,
+    position_monitor: PositionMonitor = None,
+) -> None:
     """One complete cycle: fetch data for all timeframes, run confluence, verify, predict.
 
     The position_manager controls trade execution:
@@ -235,6 +351,10 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
     """
     # Clean up expired cooldowns
     position_manager.cleanup_expired_cooldowns()
+
+    # ── 0.5. Check all open positions for TP progress and strength ──
+    if position_monitor and SETTINGS.auto_trade:
+        _check_position_strength(client, position_monitor, position_manager)
 
     for symbol in SETTINGS.symbols:
         display_cycle_header(symbol.value)
@@ -251,10 +371,10 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
             "trade_cooldown": False,
             "trade_reversed": False,
             "trade_failed": False,
-            "sl_updated": False,
             "verified": 0,
             "auto_train_started": False,
             "timeout_closed": False,
+            "strength_exit": False,
         }
 
         fetched: dict[str, pd.DataFrame] = {}
@@ -328,9 +448,6 @@ def run_signal_cycle(client: CapitalComClient, position_manager: PositionManager
                 logger.info("Live %s price: %.2f", symbol.value, live_price)
         except Exception as e:
             logger.warning("Could not fetch live price for %s: %s", symbol.value, e)
-
-        if SETTINGS.auto_trade and SETTINGS.trailing_stop_enabled:
-            _apply_profit_trailing(client, symbol, price_data, position_manager, stats)
 
         if not df_h4.empty and not df_h1.empty:
             trade_signal = generate_signal(
@@ -436,9 +553,9 @@ def _handle_trade_decision(
 
     Returns True if a NEW trade was placed, False otherwise.
 
-    Handles four scenarios:
+    Handles three scenarios:
     1. No position, no cooldown → place new trade (returns True)
-    2. Same direction position → UPDATE SL/TP (trail the stop) (returns False)
+    2. Same direction position → SKIP (already in this trade) (returns False)
     3. Opposite direction position → close old, place new (reversal) (returns True)
     4. Cooldown active → skip (returns False)
     """
@@ -451,29 +568,16 @@ def _handle_trade_decision(
         trade_signal.take_profit,
     )
 
-    if decision.action == "update_sl_tp":
-        # Same direction — update SL/TP on existing position
-        result = position_manager.execute_trade_decision(trade_signal, decision)
-
-        if result.get("sl_updated"):
-            console.print(
-                f"  [cyan]📐 SL/TP Updated:[/] "
-                f"SL→{trade_signal.stop_loss:,.2f}  TP→{trade_signal.take_profit:,.2f}  "
-                f"[dim]({decision.reason})[/]"
-            )
-            stats["sl_updated"] = True
-        else:
-            # Update was rejected (unsafe) or failed — position still open, just not updated
-            console.print(
-                f"  [yellow]⏭  SL update skipped:[/] {result.get('reason', 'unknown')}"
-            )
-            stats["trade_skipped"] = True
-        return False  # No new trade placed
-
     if decision.action == "skip_cooldown":
-        # Cooldown active after a loss/timeout
+        # Cooldown active - skip
         display_trade_skipped_cooldown(trade_signal.symbol, decision.cooldown_remaining_minutes)
         stats["trade_cooldown"] = True
+        return False  # No new trade placed
+
+    if decision.action == "skip_same_direction":
+        # Same direction position already open - skip
+        display_trade_skipped_existing(trade_signal.symbol)
+        stats["trade_skipped"] = True
         return False  # No new trade placed
 
     if decision.action == "reverse_and_place":
@@ -523,53 +627,6 @@ def _handle_trade_decision(
             return False  # No new trade placed
 
     return False  # Default: no new trade placed
-
-
-def _apply_profit_trailing(
-    client,
-    symbol: Symbol,
-    price_data: Optional[dict],
-    position_manager: PositionManager,
-    stats: dict,
-) -> None:
-    """Move SL forward as profit milestones are reached."""
-    if not price_data:
-        return
-
-    position_manager.sync_positions()
-    status = position_manager.get_status(symbol.value)
-
-    for pos in status["open_positions"]:
-        new_sl, milestone = get_trailing_stop_candidate(pos, price_data)
-        if new_sl is None or milestone is None:
-            continue
-
-        old_sl = pos.stop_level
-        current_price = (
-            price_data.get("bid") or price_data.get("ask")
-            if pos.direction.upper() == "BUY"
-            else price_data.get("ask") or price_data.get("bid")
-        )
-        old_sl_text = f"{old_sl:,.2f}" if old_sl is not None else "none"
-        current_price_text = f"{current_price:,.2f}" if current_price is not None else "n/a"
-        update_result = update_position_sl_tp_unified(client, pos, new_sl=new_sl)
-        if not update_result.success:
-            logger.warning(
-                "Profit trail update failed for %s %s: %s",
-                pos.direction,
-                pos.epic,
-                update_result.error,
-            )
-            continue
-
-        console.print(
-            f"  [cyan]📐 Profit trail:[/] "
-            f"{pos.direction} {symbol.value} hit {milestone} TP "
-            f"| [dim]price[/] {current_price_text} "
-            f"| [dim]SL[/] {old_sl_text} → {new_sl:,.2f}"
-        )
-        stats["sl_updated"] = True
-        position_manager.sync_positions()
 
 
 def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
@@ -673,7 +730,7 @@ def _try_auto_train(symbol: str, stats: dict) -> None:
         logger.error("Auto-train failed for %s: %s", symbol, e)
 
 
-def run_loop(client: CapitalComClient, position_manager: PositionManager, interval: int = 300) -> None:
+def run_loop(client: CapitalComClient, position_manager: PositionManager, position_monitor: PositionMonitor, interval: int = 300) -> None:
     """Run the signal cycle in a loop with the given interval in seconds.
 
     This keeps the PositionManager alive between cycles so cooldowns
@@ -684,7 +741,7 @@ def run_loop(client: CapitalComClient, position_manager: PositionManager, interv
 
     while True:
         try:
-            run_signal_cycle(client, position_manager)
+            run_signal_cycle(client, position_manager, position_monitor)
         except Exception as e:
             logger.error("Cycle error: %s", e)
             console.print(f"[red]✗ Cycle error: {e}[/]")
@@ -724,12 +781,16 @@ def main() -> None:
     position_manager = PositionManager(client)
     position_manager.sync_positions()
 
+    # Create position monitor — tracks TP progress and manages exits
+    position_monitor = PositionMonitor(client)
+    position_monitor.sync_positions()
+
     if args.loop:
         console.print(f"[cyan]Running in loop mode (every {args.interval}s)[/]")
-        run_loop(client, position_manager, interval=args.interval)
+        run_loop(client, position_manager, position_monitor, interval=args.interval)
     else:
         # Single cycle mode (for external loops like run_all.sh)
-        run_signal_cycle(client, position_manager)
+        run_signal_cycle(client, position_manager, position_monitor)
 
 
 if __name__ == "__main__":

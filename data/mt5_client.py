@@ -214,14 +214,23 @@ class MT5Client:
         logger.info("Fetched %d candles for %s %s", len(df), symbol.value, timeframe.value)
         return df
 
-    def get_latest_price(self, symbol: Symbol) -> Optional[dict]:
+    def get_latest_price(self, symbol) -> Optional[dict]:
         """Get the latest bid/ask for a symbol.
+
+        Args:
+            symbol: Symbol enum or string (e.g., "BTCUSD")
 
         Returns dict with bid, ask, spread, timestamp.
         """
         self._ensure_connected()
 
-        mt5_symbol = _SYMBOL_MAP.get(symbol, symbol.value)
+        # Handle both Symbol enum and string
+        if hasattr(symbol, "value"):
+            symbol_str = symbol.value
+        else:
+            symbol_str = str(symbol)
+
+        mt5_symbol = _SYMBOL_MAP.get(Symbol(symbol_str) if symbol_str in [s.value for s in Symbol] else symbol_str, symbol_str)
         tick = self._mt5.symbol_info_tick(mt5_symbol)
 
         if tick is None:

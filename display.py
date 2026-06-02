@@ -256,6 +256,26 @@ def display_timeout_closed(position: "OpenPosition", hold_minutes: float, max_mi
 # ── Cycle Summary ─────────────────────────────────────────────────────────
 
 
+def display_position_strength_exit(
+    symbol: str,
+    direction: str,
+    tp_progress: float,
+    strength_score: float,
+    pnl: float,
+    reason: str,
+) -> None:
+    """Show that a position was closed due to weak trend strength."""
+    dir_style = "[bold green]BUY[/]" if direction == "BUY" else "[bold red]SELL[/]"
+    content = (
+        f"  [red]🚪 CLOSED[/]  {dir_style} [white]{symbol}[/]\n"
+        f"  [dim]TP Progress[/]  {tp_progress:.1%}\n"
+        f"  [dim]Strength Score[/]  {strength_score:.1f}/100\n"
+        f"  [dim]P&L[/]  {pnl:+.2f}\n"
+        f"  [dim]Reason[/]  {reason}"
+    )
+    console.print(Panel(content, title="[bold red]Strength Exit[/]", border_style="red", padding=(0, 2)))
+
+
 def display_cycle_summary(stats: dict) -> None:
     """Print end-of-cycle summary panel."""
     lines = []
@@ -285,8 +305,6 @@ def display_cycle_summary(stats: dict) -> None:
         lines.append("✅ [green]Trade placed[/]")
     elif stats.get("trade_blocked"):
         lines.append("🔒 [yellow]Trade blocked[/]")
-    elif stats.get("sl_updated"):
-        lines.append("📐 [cyan]SL/TP updated (trailing stop)[/]")
     elif stats.get("trade_reversed"):
         lines.append("🔄 [yellow]Position reversed[/]")
     elif stats.get("trade_cooldown"):
@@ -307,6 +325,10 @@ def display_cycle_summary(stats: dict) -> None:
     # Timeout
     if stats.get("timeout_closed"):
         lines.append("⏰ [yellow]Position closed (timeout)[/]")
+
+    # Strength exit
+    if stats.get("strength_exit"):
+        lines.append("🚪 [yellow]Position closed (weak trend)[/]")
 
     content = "\n".join(lines)
     console.print()

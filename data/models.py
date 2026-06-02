@@ -153,3 +153,68 @@ class MLModelMeta(Base):
 
     def __repr__(self) -> str:
         return f"MLModelMeta({self.model_type} v{self.version} {self.symbol})"
+
+
+class TradeLog(Base):
+    """Comprehensive trade execution log for analysis.
+
+    Tracks every trade from entry to exit with:
+    - Entry and exit details
+    - MFE/MAE (best/worst prices seen)
+    - TP progress tracking
+    - Trade strength score history
+    - Final PnL and outcome
+    """
+    __tablename__ = "trade_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    deal_id: Mapped[str] = mapped_column(String(100), nullable=True)  # Broker deal reference
+
+    # Position details
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)  # BUY/SELL
+    size: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Entry and exit
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    take_profit: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Timestamps
+    opened_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Excursion metrics
+    mfe_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Max favorable price
+    mae_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Max adverse price
+    mfe_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Best unrealized PnL
+    mae_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Worst unrealized PnL
+
+    # TP Progress
+    highest_tp_progress: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0.0 to 1.0+
+
+    # Strength score history (JSON string)
+    strength_scores: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Outcome
+    final_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    close_reason: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # close_reason values: "tp_hit", "sl_hit", "manual", "timeout", "strength_exit", "reversal"
+
+    # Signal reference
+    signal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_trade_log_symbol", "symbol"),
+        Index("ix_trade_log_opened_at", "opened_at"),
+        Index("ix_trade_log_closed_at", "closed_at"),
+        Index("ix_trade_log_close_reason", "close_reason"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"TradeLog({self.direction} {self.symbol} "
+            f"entry={self.entry_price} exit={self.exit_price} "
+            f"pnl={self.final_pnl})"
+        )

@@ -30,9 +30,6 @@ from trading_ai.trade.executor import (
     OpenPosition,
     close_position,
     get_open_positions,
-    should_update_sl,
-    update_position_sl_tp,
-    update_position_sl_tp_unified,
     get_open_positions_unified,
     has_open_position_unified,
     place_trade_unified,
@@ -76,12 +73,10 @@ class CooldownEntry:
 @dataclass
 class TradeDecision:
     """Result of checking whether a trade should be placed."""
-    action: str  # "place", "update_sl_tp", "skip_cooldown", "reverse_and_place"
+    action: str  # "place", "skip_cooldown", "reverse_and_place"
     reason: str
     existing_position: Optional[OpenPosition] = None
     cooldown_remaining_minutes: float = 0.0
-    new_sl: Optional[float] = None
-    new_tp: Optional[float] = None
 
 
 class PositionManager:
@@ -90,12 +85,11 @@ class PositionManager:
     Key rules:
     - ALWAYS generate signals (for ML training data)
     - But control whether a TRADE is placed based on position state:
-      * Same direction as open position → UPDATE SL/TP (trail the stop)
+      * Same direction as open position → SKIP (already in position)
       * Opposite direction → close old position, place new trade (reversal)
       * No position + no cooldown → place trade
       * Cooldown active → skip trade
     - Deduplicate signal storage (don't store redundant signals)
-    - SL updates are safety-checked to prevent dangerous moves
     """
 
     def __init__(self, client: CapitalComClient):
@@ -168,21 +162,24 @@ class PositionManager:
 
         Returns a TradeDecision with action:
         - "place": no position, no cooldown → go ahead
-        - "update_sl_tp": same direction → update SL/TP on existing position
         - "skip_cooldown": cooldown active → wait
         - "reverse_and_place": opposite direction → close old, place new
+        - Same direction position → SKIP (already in this trade)
         """
         now = datetime.now(timezone.utc)
 
         # 1. Check cooldowns
         for cd in self.cooldowns:
-            if cd.symbol == symbol and now < cd.until:
-                remaining = (cd.until - now).total_seconds() / 60
-                return TradeDecision(
-                    action="skip_cooldown",
-                    reason=f"Cooldown: {remaining:.0f} min left after {cd.reason}",
-                    cooldown_remaining_minutes=remaining,
-                )
+            if cd.symbol == symbol:
+                remaining_seconds = (cd.until - now).total_seconds()
+                # Consider cooldowns with < 30 seconds remaining as expired
+                if remaining_seconds > 30:
+                    remaining_minutes = remaining_seconds / 60
+                    return TradeDecision(
+                        action="skip_cooldown",
+                        reason=f"Cooldown: {remaining_minutes:.0f} min left after {cd.reason}",
+                        cooldown_remaining_minutes=remaining_minutes,
+                    )
 
         # 2. Check open positions
         self.sync_positions()
@@ -195,17 +192,11 @@ class PositionManager:
                     new_dir = direction.upper()
 
                     if pos_dir == new_dir:
-                        # Same direction — UPDATE SL/TP instead of placing a new trade
-                        # This is the key change: trail the stop using the new signal's levels
+                        # Same direction — skip, already in this trade
                         return TradeDecision(
-                            action="update_sl_tp",
-                            reason=(
-                                f"Open {pos_dir} {symbol} — updating SL/TP "
-                                f"(deal {pos.deal_id})"
-                            ),
-                            existing_position=pos,
-                            new_sl=new_sl,
-                            new_tp=new_tp,
+                            action="skip_same_direction",
+                            reason=f"Open {pos_dir} {symbol} — same direction, skipping",
+                            cooldown_remaining_minutes=0.0,
                         )
                     else:
                         # Opposite direction — close old, take new
@@ -237,7 +228,6 @@ class PositionManager:
             reason: str
             deal_reference: Optional[str]
             closed_position: Optional[str]  # if we reversed
-            sl_updated: bool  # if we updated SL
         """
         from trading_ai.trade.executor import place_trade_unified
 
@@ -247,57 +237,10 @@ class PositionManager:
             "reason": decision.reason,
             "deal_reference": None,
             "closed_position": None,
-            "sl_updated": False,
         }
 
         if decision.action == "skip_cooldown":
             logger.info("Trade skipped: %s", decision.reason)
-            return result
-
-        if decision.action == "update_sl_tp":
-            # Same direction — update SL and TP on the existing position
-            pos = decision.existing_position
-            new_sl = decision.new_sl
-            new_tp = decision.new_tp
-
-            # Safety check: is the new SL safe to apply?
-            is_safe, reason = should_update_sl(
-                direction=pos.direction,
-                current_sl=pos.stop_level if pos.stop_level is not None else pos.level,
-                new_sl=new_sl,
-                entry_price=pos.level,
-            )
-
-            if not is_safe:
-                logger.warning("SL update rejected for %s: %s", pos.deal_id, reason)
-                result["reason"] = f"SL update unsafe: {reason}"
-                # Still considered "success" — we have a position, just not updating
-                result["success"] = True
-                return result
-
-            # Try to update the position on the broker
-            update_result = update_position_sl_tp_unified(
-                self.client, pos,
-                new_sl=new_sl,
-                new_tp=new_tp,
-            )
-
-            if update_result.success:
-                logger.info(
-                    "SL/TP updated for %s %s: SL→%.2f TP→%.2f",
-                    pos.direction, pos.epic, new_sl, new_tp,
-                )
-                result["success"] = True
-                result["sl_updated"] = True
-                result["reason"] = (
-                    f"Updated SL→{new_sl:.2f} TP→{new_tp:.2f} "
-                    f"on {pos.direction} {pos.epic}"
-                )
-            else:
-                logger.warning("SL/TP update failed for %s: %s", pos.deal_id, update_result.error)
-                result["reason"] = f"SL/TP update failed: {update_result.error}"
-                # Not an error that prevents the position from continuing
-                result["success"] = True
             return result
 
         if decision.action == "reverse_and_place":
