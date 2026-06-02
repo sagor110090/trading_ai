@@ -28,13 +28,12 @@ set TRADE_MODE=%TRADE_MODE: =%
 echo ==========================================
 echo   Trading AI  ^|  Mode: %TRADE_MODE%
 echo   Database: SQLite (trading_ai.db)
-echo   Running every %INTERVAL% seconds
+echo   Main cycle:    every %INTERVAL% seconds
+echo   Position monitor: every 60 seconds (background)
 echo   Press Ctrl+C to stop
 echo ==========================================
 
-:loop
-"%PYTHON_PATH%" -m trading_ai.main
-echo.
-echo Next cycle in %INTERVAL% seconds...
-timeout /t %INTERVAL% /nobreak >nul
-goto loop
+REM Use --loop so a single Python process stays alive.
+REM This lets the background position-monitor thread tick every 60s
+REM while the main signal cycle runs every %INTERVAL% seconds.
+"%PYTHON_PATH%" -m trading_ai.main --loop --interval %INTERVAL%

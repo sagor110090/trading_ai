@@ -27,7 +27,7 @@ from trading_ai.trade.executor import (
     close_position_unified,
     get_open_positions_unified,
 )
-from trading_ai.trade.strength_score import TradeStrengthScore, StrengthScoreResult
+from trading_ai.trade.strength_score import TradeStrengthScore, StrengthScoreComponents, StrengthScoreResult
 from trading_ai.trade.tp_tracker import TPProgressTracker
 
 logger = logging.getLogger(__name__)
@@ -221,13 +221,18 @@ class PositionMonitor:
             try:
                 strength_result = self._evaluate_strength(pos, df_provider)
 
-                # Record the score
+                # Record the score (guard against missing components)
+                components_dict = (
+                    strength_result.components.to_dict()
+                    if strength_result.components is not None
+                    else {}
+                )
                 self.tp_tracker.record_strength_score(
                     pos.epic, pos.direction,
                     score=strength_result.score,
                     decision=strength_result.decision,
                     reason=strength_result.reason,
-                    components=strength_result.components.to_dict(),
+                    components=components_dict,
                 )
 
                 # Make decision based on strength
@@ -307,7 +312,7 @@ class PositionMonitor:
             logger.warning("No data available for strength evaluation of %s", pos.epic)
             return StrengthScoreResult(
                 score=50.0,
-                components=None,  # type: ignore
+                components=StrengthScoreComponents(),
                 decision="monitor",
                 reason="No data for evaluation",
             )

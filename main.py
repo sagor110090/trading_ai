@@ -10,6 +10,7 @@ Key behaviors:
 
 import logging
 import sys
+import threading
 from typing import Optional
 
 import pandas as pd
@@ -243,9 +244,31 @@ def _check_position_strength(
     from rich.table import Table
 
     def df_provider(symbol: str, timeframe: str) -> pd.DataFrame:
-        """Provider function to get DataFrame for strength scoring."""
+        """Provider function to get DataFrame for strength scoring.
+
+        `symbol` and `timeframe` are strings coming from the position monitor,
+        but `client.fetch_candles` expects Symbol/Timeframe enum values.
+        We resolve them here.
+        """
         try:
-            df = client.fetch_candles(symbol, timeframe, limit=100)
+            try:
+                sym_enum = Symbol(symbol) if symbol not in [s.value for s in Symbol] else Symbol(symbol)
+            except ValueError:
+                sym_enum = next((s for s in Symbol if s.value == symbol), None)
+            if sym_enum is None:
+                logger.error("Unknown symbol for strength check: %s", symbol)
+                return pd.DataFrame()
+
+            tf_enum = None
+            for tf in Timeframe:
+                if tf.value == timeframe:
+                    tf_enum = tf
+                    break
+            if tf_enum is None:
+                logger.error("Unknown timeframe for strength check: %s", timeframe)
+                return pd.DataFrame()
+
+            df = client.fetch_candles(sym_enum, tf_enum, limit=100)
             if df.empty:
                 return pd.DataFrame()
             df = compute_all_features(df)
@@ -352,9 +375,9 @@ def run_signal_cycle(
     # Clean up expired cooldowns
     position_manager.cleanup_expired_cooldowns()
 
-    # ── 0.5. Check all open positions for TP progress and strength ──
-    if position_monitor and SETTINGS.auto_trade:
-        _check_position_strength(client, position_monitor, position_manager)
+    # NOTE: Position-monitor display is handled by the background
+    # _monitor_loop (runs every 60s). It is intentionally NOT called
+    # here so the monitor output isn't duplicated every main cycle.
 
     for symbol in SETTINGS.symbols:
         display_cycle_header(symbol.value)
@@ -730,18 +753,72 @@ def _try_auto_train(symbol: str, stats: dict) -> None:
         logger.error("Auto-train failed for %s: %s", symbol, e)
 
 
-def run_loop(client: CapitalComClient, position_manager: PositionManager, position_monitor: PositionMonitor, interval: int = 300) -> None:
-    """Run the signal cycle in a loop with the given interval in seconds.
+_monitor_lock = threading.Lock()
 
-    This keeps the PositionManager alive between cycles so cooldowns
-    and position state persist correctly.
+
+def _monitor_loop(
+    client: CapitalComClient,
+    position_manager: PositionManager,
+    position_monitor: PositionMonitor,
+    interval: int = 60,
+) -> None:
+    """Background loop that runs the position monitor every `interval` seconds.
+
+    This runs independently of the main signal cycle so open positions are
+    tracked more frequently (default 60s) for better TP / strength decisions.
+    A lock prevents overlap with the main cycle.
     """
     import time
     from rich.text import Text
 
     while True:
         try:
-            run_signal_cycle(client, position_manager, position_monitor)
+            from datetime import datetime
+            from rich.panel import Panel
+            now_str = datetime.now().strftime("%H:%M:%S")
+            with _monitor_lock:
+                banner = (
+                    "[bold]Position Monitor[/]\n"
+                    f"[dim]Tick: every {interval}s (background)[/]\n"
+                    f"[dim]Time: {now_str}[/]"
+                )
+                console.print(
+                    Panel(banner, border_style="cyan", expand=False, width=44)
+                )
+                _check_position_strength(client, position_monitor, position_manager)
+        except Exception as e:
+            logger.error("Monitor loop error: %s", e)
+            console.print(f"[red]✗ Monitor loop error: {e}[/]")
+        console.print()
+        console.print(f"[dim]Next position-monitor check in {interval}s...[/]")
+        time.sleep(interval)
+
+
+def run_loop(client: CapitalComClient, position_manager: PositionManager, position_monitor: PositionMonitor, interval: int = 300) -> None:
+    """Run the signal cycle in a loop with the given interval in seconds.
+
+    This keeps the PositionManager alive between cycles so cooldowns
+    and position state persist correctly.
+
+    A background thread also runs the position monitor every 60s so open
+    positions are tracked more frequently than the main cycle.
+    """
+    import time
+    from rich.text import Text
+
+    monitor_thread = threading.Thread(
+        target=_monitor_loop,
+        args=(client, position_manager, position_monitor, 60),
+        daemon=True,
+        name="position-monitor",
+    )
+    monitor_thread.start()
+    console.print("[cyan]Position monitor running every 60s (background thread)[/]")
+
+    while True:
+        try:
+            with _monitor_lock:
+                run_signal_cycle(client, position_manager, position_monitor)
         except Exception as e:
             logger.error("Cycle error: %s", e)
             console.print(f"[red]✗ Cycle error: {e}[/]")
