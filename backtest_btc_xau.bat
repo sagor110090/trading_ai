@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM Backtest BTC & XAU Pairs - 2 Weeks Each
+REM Backtest BTC & XAU Pairs - 8 Weeks Each, Day Trading Mode
 REM Tests: BTCUSD, XAUUSD
 REM ============================================================
 
@@ -9,7 +9,6 @@ cd /d "%~dp0.."
 
 setlocal enabledelayedexpansion
 
-REM Colors (if supported)
 set "GREEN=[92m"
 set "RED=[91m"
 set "YELLOW=[93m"
@@ -18,15 +17,17 @@ set "RESET=[0m"
 
 echo.
 echo %CYAN%============================================================%RESET%
-echo %CYAN%  Backtesting BTC & XAU Pairs (2 weeks each)%RESET%
+echo %CYAN%  Backtesting BTC ^& XAU Pairs (8 weeks each)%RESET%
+echo %CYAN%  Mode: day_trading ^| Reset: Yes%RESET%
 echo %CYAN%============================================================%RESET%
 echo.
 echo This will backtest the following pairs sequentially:
 echo   1. BTCUSD  (Bitcoin/US Dollar)
 echo   2. XAUUSD  (Gold/US Dollar)
 echo.
-echo Weeks per pair: 2
-echo Trade Mode: day_trading (from .env)
+echo Weeks per pair: 8
+echo Trade Mode: day_trading
+echo Reset: Yes (clears old signals and ML models)
 echo.
 echo Starting in 3 seconds...
 timeout /t 3 /nobreak >nul
@@ -39,7 +40,7 @@ echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━
 echo %CYAN%  Pair 1/2: BTCUSD (Bitcoin/US Dollar)%RESET%
 echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
 echo.
-python -m trading_ai.backtest_historical --weeks 2 --symbol BTCUSD
+python -m trading_ai.backtest_historical --weeks 8 --step 1 --mode day_trading --symbol BTCUSD --reset
 
 if !errorlevel! neq 0 (
     echo.
@@ -63,7 +64,7 @@ echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━
 echo %CYAN%  Pair 2/2: XAUUSD (Gold/US Dollar)%RESET%
 echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
 echo.
-python -m trading_ai.backtest_historical --weeks 2 --symbol XAUUSD
+python -m trading_ai.backtest_historical --weeks 8 --step 1 --mode day_trading --symbol XAUUSD --reset
 
 if !errorlevel! neq 0 (
     echo.
@@ -87,16 +88,16 @@ echo %CYAN%  All Backtests Complete!%RESET%
 echo %CYAN%============================================================%RESET%
 echo.
 echo Backtested pairs:
-echo   • BTCUSD
-echo   • XAUUSD
+echo   * BTCUSD  (8 weeks, day_trading)
+echo   * XAUUSD  (8 weeks, day_trading)
 echo.
 echo Check the results above for win rates.
 echo Update your .env SYMBOLS to keep only profitable pairs.
 echo.
 echo %YELLOW%Next steps:%RESET%
 echo   1. Review win rate for each pair
-echo   2. Keep pairs with ^>40% win rate
-echo   3. Remove pairs with ^<30% win rate
-echo   4. Re-run AI training with updated data
+echo   2. Keep pairs with ^>40%% win rate
+echo   3. Remove pairs with ^<30%% win rate
+echo   4. Run: run.bat to start live trading
 echo.
 pause
