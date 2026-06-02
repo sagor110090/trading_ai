@@ -6,7 +6,7 @@ Tracks:
 - Maximum Adverse Excursion (MAE): worst price reached
 - Highest TP progress reached
 
-When TP progress reaches 60%, triggers strength evaluation.
+When TP progress reaches 40%, triggers strength evaluation.
 """
 
 import logging
@@ -160,16 +160,16 @@ class TPProgress:
         """
         progress = self.calculate_progress(current_price)
 
-        # First time reaching 60% (or already above 60% on first check)
-        if progress >= 0.60:
-            # If we haven't evaluated yet and progress is >= 60%
-            if self.highest_tp_progress < 0.60:
+        # First time reaching 40% (or already above 40% on first check)
+        if progress >= 0.40:
+            # If we haven't evaluated yet and progress is >= 40%
+            if self.highest_tp_progress < 0.40:
                 logger.info(
-                    "Strength eval triggered: TP >= 60%% (progress: %.1f%%, highest: %.1f%%)",
+                    "Strength eval triggered: TP >= 40%% (progress: %.1f%%, highest: %.1f%%)",
                     progress * 100, self.highest_tp_progress * 100,
                 )
-                return True, f"TP progress reached 60% (current: {progress:.1%})"
-            # If progress is >= 60% but no strength scores recorded yet (first check for existing position)
+                return True, f"TP progress reached 40% (current: {progress:.1%})"
+            # If progress is >= 40% but no strength scores recorded yet (first check for existing position)
             elif not self.strength_scores and self.last_checked is None:
                 logger.info(
                     "Strength eval triggered: Already at %.1f%% with no prior evaluation",

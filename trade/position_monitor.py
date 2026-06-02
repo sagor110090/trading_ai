@@ -3,7 +3,7 @@
 Monitors every cycle:
 1. Fetches current price for open positions
 2. Calculates TP progress
-3. At 60% TP progress, evaluates trade strength
+3. At 40% TP progress, evaluates trade strength
 4. Closes position if strength score < 50
 
 Integrates with:
@@ -226,7 +226,7 @@ class PositionMonitor:
         # Also force evaluation if TP is above 60% but no strength score recorded
         tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
         force_eval = (
-            tp_progress >= 0.60 and tracked is not None
+            tp_progress >= 0.40 and tracked is not None
             and len(tracked.strength_scores) == 0
         )
 
