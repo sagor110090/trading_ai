@@ -157,11 +157,35 @@ class MT5Client:
         if mt5_tf is None:
             raise ValueError(f"MT5 module missing timeframe constant {mt5_tf_name}")
 
-        # Check if symbol exists in MT5
+        # Check if symbol exists in MT5 (try common broker suffixes if not found)
+        attempted = [mt5_symbol]
         symbol_info = self._mt5.symbol_info(mt5_symbol)
         if not symbol_info:
-            logger.error("Symbol '%s' not found in MT5. Available symbols: %s",
-                        mt5_symbol, self._get_available_symbols())
+            for suffix in [".i", ".raw", ".pro", ".ecn", "m", ".micro", ".mini"]:
+                alt_symbol = f"{mt5_symbol}{suffix}"
+                info = self._mt5.symbol_info(alt_symbol)
+                if info:
+                    logger.info("Symbol '%s' found as '%s' in MT5", mt5_symbol, alt_symbol)
+                    symbol_info = info
+                    mt5_symbol = alt_symbol
+                    break
+                attempted.append(alt_symbol)
+
+        if not symbol_info:
+            available = self._get_available_symbols()
+            for avail in (available or []):
+                if mt5_symbol.replace(".", "") in avail.replace(".", "") or avail.replace(".", "") in mt5_symbol.replace(".", ""):
+                    info = self._mt5.symbol_info(avail)
+                    if info:
+                        logger.info("Symbol '%s' matched to '%s' in MT5", mt5_symbol, avail)
+                        symbol_info = info
+                        mt5_symbol = avail
+                        break
+
+        if not symbol_info:
+            available = available if 'available' in dir() else self._get_available_symbols()
+            logger.error("Symbol '%s' not found in MT5 (tried: %s). Available symbols: %s",
+                        mt5_symbol, ", ".join(set(attempted)), available[:20] if available else "[]")
             return pd.DataFrame()
         if not symbol_info.visible and not self._mt5.symbol_select(mt5_symbol, True):
             logger.error("Failed to select MT5 symbol '%s' in Market Watch", mt5_symbol)
@@ -234,7 +258,29 @@ class MT5Client:
         tick = self._mt5.symbol_info_tick(mt5_symbol)
 
         if tick is None:
-            logger.error("Failed to get tick for %s", mt5_symbol)
+            # Try common broker suffixes
+            for suffix in [".i", ".raw", ".pro", ".ecn", "m", ".micro", ".mini"]:
+                alt_symbol = f"{mt5_symbol}{suffix}"
+                alt_tick = self._mt5.symbol_info_tick(alt_symbol)
+                if alt_tick:
+                    tick = alt_tick
+                    mt5_symbol = alt_symbol
+                    break
+
+        if tick is None:
+            # Try fuzzy match against available symbols
+            available = self._get_available_symbols()
+            for avail in (available or []):
+                if mt5_symbol.replace(".", "") in avail.replace(".", "") or avail.replace(".", "") in mt5_symbol.replace(".", ""):
+                    alt_tick = self._mt5.symbol_info_tick(avail)
+                    if alt_tick:
+                        tick = alt_tick
+                        mt5_symbol = avail
+                        logger.info("get_latest_price: symbol '%s' matched to '%s'", symbol_str, avail)
+                        break
+
+        if tick is None:
+            logger.error("Failed to get tick for %s (tried: %s)", mt5_symbol, symbol_str)
             return None
 
         return {

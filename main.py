@@ -330,6 +330,15 @@ def _check_position_strength(
                 )
                 # Register the close with position manager
                 position_manager.register_closed(decision.symbol, "strength_exit")
+            elif decision.action == "trail_stop":
+                table.add_row(
+                    decision.symbol[:10],
+                    decision.direction[:4],
+                    f"[green]{decision.tp_progress:.1%}[/]",
+                    f"[green]{decision.pnl or 0:+.2f}[/]",
+                    f"{decision.strength_score:.1f}" if decision.strength_score is not None else "N/A",
+                    f"[cyan]SL->{decision.new_sl:.2f}[/]",
+                )
             elif decision.action == "hold":
                 if decision.strength_score is not None:
                     # Strength was evaluated

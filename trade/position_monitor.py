@@ -26,6 +26,7 @@ from trading_ai.trade.executor import (
     OpenPosition,
     close_position_unified,
     get_open_positions_unified,
+    update_position_sl_tp_unified,
 )
 from trading_ai.trade.strength_score import TradeStrengthScore, StrengthScoreComponents, StrengthScoreResult
 from trading_ai.trade.tp_tracker import TPProgressTracker
@@ -36,13 +37,14 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MonitorDecision:
     """Decision made by position monitor."""
-    action: str  # "hold", "close", "error"
+    action: str  # "hold", "close", "trail_stop", "error"
     reason: str
     symbol: str = ""  # Symbol name
     direction: str = ""  # "BUY" or "SELL"
     tp_progress: float = 0.0
     strength_score: Optional[float] = None
     pnl: Optional[float] = None
+    new_sl: Optional[float] = None
 
 
 class PositionMonitor:
@@ -148,6 +150,9 @@ class PositionMonitor:
                 # Execute close if needed
                 if decision.action == "close":
                     self._execute_close(pos, decision)
+                # Execute trailing stop if needed
+                elif decision.action == "trail_stop":
+                    self._execute_trail_stop(pos, decision)
 
             except Exception as e:
                 import traceback
@@ -223,12 +228,13 @@ class PositionMonitor:
             deal_id=deal_id,
         )
 
-        # Also force evaluation if TP is above 60% but no strength score recorded
         tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
         force_eval = (
             tp_progress >= 0.40 and tracked is not None
             and len(tracked.strength_scores) == 0
         )
+        if force_eval and not eval_reason:
+            eval_reason = f"TP progress at {tp_progress:.1%} - initial evaluation"
 
         if should_eval or force_eval:
             logger.info(
@@ -240,7 +246,17 @@ class PositionMonitor:
             try:
                 strength_result = self._evaluate_strength(pos, df_provider)
 
-                # Record the score (guard against missing components)
+                if strength_result.score == 50.0 and strength_result.reason == "No data for evaluation":
+                    logger.warning("Strength evaluation returned no-data for %s %s - cannot close", pos.direction, pos.epic)
+                    return MonitorDecision(
+                        action="hold",
+                        reason="Strength eval: no market data available",
+                        symbol=pos.epic,
+                        direction=pos.direction,
+                        tp_progress=tp_progress,
+                        pnl=pnl,
+                    )
+
                 components_dict = (
                     strength_result.components.to_dict()
                     if strength_result.components is not None
@@ -255,11 +271,10 @@ class PositionMonitor:
                     deal_id=deal_id,
                 )
 
-                # Make decision based on strength
                 if strength_result.decision == "exit":
                     return MonitorDecision(
                         action="close",
-                        reason=f"{eval_reason if should_eval else 'Forced'}; {strength_result.reason}",
+                        reason=f"{eval_reason}; {strength_result.reason}",
                         symbol=pos.epic,
                         direction=pos.direction,
                         tp_progress=tp_progress,
@@ -269,14 +284,14 @@ class PositionMonitor:
                 elif strength_result.decision == "monitor":
                     return MonitorDecision(
                         action="hold",
-                        reason=f"{eval_reason if should_eval else 'Forced'}; {strength_result.reason}",
+                        reason=f"{eval_reason}; {strength_result.reason}",
                         symbol=pos.epic,
                         direction=pos.direction,
                         tp_progress=tp_progress,
                         strength_score=strength_result.score,
                         pnl=pnl,
                     )
-                else:  # "hold" decision from scorer
+                else:
                     return MonitorDecision(
                         action="hold",
                         reason=strength_result.reason,
@@ -289,7 +304,6 @@ class PositionMonitor:
             except Exception as e:
                 import traceback
                 logger.error("Strength evaluation failed for %s: %s\n%s", pos.epic, e, traceback.format_exc())
-                # Continue with hold but no strength score
                 return MonitorDecision(
                     action="hold",
                     reason=f"Strength eval failed: {str(e)[:50]}",
@@ -298,8 +312,13 @@ class PositionMonitor:
                     tp_progress=tp_progress,
                     pnl=pnl,
                 )
-        elif should_eval and not df_provider:
+        elif (should_eval or force_eval) and not df_provider:
             logger.warning("Strength evaluation skipped: no df_provider for %s", pos.epic)
+
+        # Trailing stop: move SL to protect profits as TP progress increases
+        trail_decision = self._check_trailing_stop(pos, tracked, current_price, tp_progress)
+        if trail_decision is not None:
+            return trail_decision
 
         # Default: hold
         return MonitorDecision(
@@ -310,6 +329,109 @@ class PositionMonitor:
             tp_progress=tp_progress,
             pnl=pnl,
         )
+
+    def _check_trailing_stop(
+        self,
+        pos: OpenPosition,
+        tracked: Optional[object],
+        current_price: float,
+        tp_progress: float,
+    ) -> Optional[MonitorDecision]:
+        """Check if stop loss should be moved to protect profits.
+
+        Trailing stop levels based on TP progress:
+        - >= 40%: move SL to breakeven (entry price)
+        - >= 60%: move SL to 40% of TP distance
+        - >= 80%: move SL to 60% of TP distance
+        - >= 95%: move SL to 80% of TP distance (very close to TP)
+
+        Only moves SL in the protective direction (tighter).
+        """
+        if tracked is None or tp_progress < 0.40:
+            return None
+
+        entry = tracked.entry_price
+        sl = tracked.stop_loss
+        tp = tracked.take_profit
+        direction = pos.direction.upper()
+
+        if direction == "BUY":
+            if tp <= entry:
+                return None
+            tp_distance = tp - entry
+            if tp_progress >= 0.95:
+                target_sl = entry + tp_distance * 0.80
+            elif tp_progress >= 0.80:
+                target_sl = entry + tp_distance * 0.60
+            elif tp_progress >= 0.60:
+                target_sl = entry + tp_distance * 0.40
+            else:
+                target_sl = entry  # breakeven
+
+            # Only move SL up (never down for BUY)
+            current_sl = sl if sl and sl > 0 else entry
+            if target_sl <= current_sl:
+                return None
+
+            logger.info(
+                "Trailing stop: %s %s SL %.2f -> %.2f (TP progress: %.1f%%)",
+                direction, pos.epic, current_sl, target_sl, tp_progress * 100,
+            )
+            return MonitorDecision(
+                action="trail_stop",
+                reason=f"Trailing stop: SL {current_sl:.2f} -> {target_sl:.2f} (TP {tp_progress:.1%})",
+                symbol=pos.epic,
+                direction=pos.direction,
+                tp_progress=tp_progress,
+                pnl=pos.upl,
+                new_sl=target_sl,
+            )
+        else:  # SELL
+            if tp >= entry:
+                return None
+            tp_distance = entry - tp
+            if tp_progress >= 0.95:
+                target_sl = entry - tp_distance * 0.80
+            elif tp_progress >= 0.80:
+                target_sl = entry - tp_distance * 0.60
+            elif tp_progress >= 0.60:
+                target_sl = entry - tp_distance * 0.40
+            else:
+                target_sl = entry  # breakeven
+
+            # Only move SL down (never up for SELL)
+            current_sl = sl if sl and sl > 0 else entry
+            if target_sl >= current_sl:
+                return None
+
+            logger.info(
+                "Trailing stop: %s %s SL %.2f -> %.2f (TP progress: %.1f%%)",
+                direction, pos.epic, current_sl, target_sl, tp_progress * 100,
+            )
+            return MonitorDecision(
+                action="trail_stop",
+                reason=f"Trailing stop: SL {current_sl:.2f} -> {target_sl:.2f} (TP {tp_progress:.1%})",
+                symbol=pos.epic,
+                direction=pos.direction,
+                tp_progress=tp_progress,
+                pnl=pos.upl,
+                new_sl=target_sl,
+            )
+
+    def _execute_trail_stop(self, pos: OpenPosition, decision: MonitorDecision) -> None:
+        """Move stop loss to protect profits."""
+        result = update_position_sl_tp_unified(self.client, pos, new_sl=decision.new_sl)
+
+        if result.success:
+            logger.info(
+                "Trailing stop applied: %s %s new SL=%.2f",
+                pos.direction, pos.epic, decision.new_sl,
+            )
+        else:
+            logger.error(
+                "Trailing stop failed: %s %s - %s",
+                pos.direction, pos.epic, result.error,
+            )
 
     def _evaluate_strength(
         self,
@@ -353,33 +475,66 @@ class PositionMonitor:
         return result
 
     def _execute_close(self, pos: OpenPosition, decision: MonitorDecision) -> None:
-        """Execute a close decision.
-
-        Closes the position and logs to database.
-        """
+        """Execute a close decision with retry and verification."""
         logger.info(
-            "Closing %s %s: %s (TP progress: %.1%%, Strength: %.1f)",
+            "Closing %s %s: %s (TP progress: %.1f%%, Strength: %.1f)",
             pos.direction, pos.epic, decision.reason,
             decision.tp_progress * 100,
             decision.strength_score or 0,
         )
 
-        # Close the position
-        close_result = close_position_unified(self.client, pos)
+        max_retries = 3
+        close_result = None
 
-        if close_result.success:
-            # Get final stats from tracker
-            final_stats = self.tp_tracker.close_position(
-                pos.epic, pos.direction,
-                exit_price=close_result.close_level or pos.level,
-                reason=f"strength_exit:{decision.reason[:50]}",
-                deal_id=str(pos.deal_id),
+        for attempt in range(1, max_retries + 1):
+            close_result = close_position_unified(self.client, pos)
+
+            if close_result.success:
+                break
+
+            logger.warning(
+                "Close attempt %d/%d failed for %s %s: %s",
+                attempt, max_retries, pos.direction, pos.epic, close_result.error,
             )
+            if attempt < max_retries:
+                import time
+                time.sleep(2 * attempt)
 
-            if final_stats:
-                self._log_trade(final_stats)
-        else:
-            logger.error("Failed to close position: %s", close_result.error)
+        if close_result is None or not close_result.success:
+            logger.critical(
+                "FAILED to close position after %d attempts: %s %s (deal_id=%s) - MANUAL INTERVENTION REQUIRED",
+                max_retries, pos.direction, pos.epic, pos.deal_id,
+            )
+            return
+
+        # Verify position is actually closed
+        import time
+        time.sleep(2)
+        broker_positions = get_open_positions_unified(self.client)
+        still_open = any(str(p.deal_id) == str(pos.deal_id) for p in broker_positions)
+
+        if still_open:
+            logger.critical(
+                "Position %s %s (deal_id=%s) still open after close confirmation - MANUAL INTERVENTION REQUIRED",
+                pos.direction, pos.epic, pos.deal_id,
+            )
+            return
+
+        # Get final stats from tracker
+        final_stats = self.tp_tracker.close_position(
+            pos.epic, pos.direction,
+            exit_price=close_result.close_level or pos.level,
+            reason=f"strength_exit:{decision.reason[:50]}",
+            deal_id=str(pos.deal_id),
+        )
+
+        if final_stats:
+            self._log_trade(final_stats)
+
+        logger.info(
+            "Position closed and verified: %s %s (deal_id=%s)",
+            pos.direction, pos.epic, pos.deal_id,
+        )
 
     def _log_trade(self, stats: dict) -> None:
         """Log trade statistics to database."""
