@@ -248,14 +248,7 @@ class PositionMonitor:
 
                 if strength_result.score == 50.0 and strength_result.reason == "No data for evaluation":
                     logger.warning("Strength evaluation returned no-data for %s %s - cannot close", pos.direction, pos.epic)
-                    return MonitorDecision(
-                        action="hold",
-                        reason="Strength eval: no market data available",
-                        symbol=pos.epic,
-                        direction=pos.direction,
-                        tp_progress=tp_progress,
-                        pnl=pnl,
-                    )
+                    # Fall through to trailing stop check
 
                 components_dict = (
                     strength_result.components.to_dict()
@@ -272,7 +265,7 @@ class PositionMonitor:
                 )
 
                 if strength_result.decision == "exit":
-                    return MonitorDecision(
+                    close_decision = MonitorDecision(
                         action="close",
                         reason=f"{eval_reason}; {strength_result.reason}",
                         symbol=pos.epic,
@@ -281,37 +274,13 @@ class PositionMonitor:
                         strength_score=strength_result.score,
                         pnl=pnl,
                     )
-                elif strength_result.decision == "monitor":
-                    return MonitorDecision(
-                        action="hold",
-                        reason=f"{eval_reason}; {strength_result.reason}",
-                        symbol=pos.epic,
-                        direction=pos.direction,
-                        tp_progress=tp_progress,
-                        strength_score=strength_result.score,
-                        pnl=pnl,
-                    )
-                else:
-                    return MonitorDecision(
-                        action="hold",
-                        reason=strength_result.reason,
-                        symbol=pos.epic,
-                        direction=pos.direction,
-                        tp_progress=tp_progress,
-                        strength_score=strength_result.score,
-                        pnl=pnl,
-                    )
+                    # Close takes priority - no need to check trailing stop
+                    return close_decision
+                # hold/monitor: fall through to trailing stop check
             except Exception as e:
                 import traceback
                 logger.error("Strength evaluation failed for %s: %s\n%s", pos.epic, e, traceback.format_exc())
-                return MonitorDecision(
-                    action="hold",
-                    reason=f"Strength eval failed: {str(e)[:50]}",
-                    symbol=pos.epic,
-                    direction=pos.direction,
-                    tp_progress=tp_progress,
-                    pnl=pnl,
-                )
+                # Fall through to trailing stop check
         elif (should_eval or force_eval) and not df_provider:
             logger.warning("Strength evaluation skipped: no df_provider for %s", pos.epic)
 
@@ -368,9 +337,10 @@ class PositionMonitor:
             else:
                 target_sl = entry  # breakeven
 
-            # Only move SL up (never down for BUY)
+            # Only move SL up (tighter for BUY)
+            # If no SL set, use entry as baseline so breakeven triggers
             current_sl = sl if sl and sl > 0 else entry
-            if target_sl <= current_sl:
+            if target_sl <= current_sl + 0.00001:  # small buffer for float comparison
                 return None
 
             logger.info(
@@ -399,9 +369,10 @@ class PositionMonitor:
             else:
                 target_sl = entry  # breakeven
 
-            # Only move SL down (never up for SELL)
+            # Only move SL down (tighter for SELL)
+            # If no SL set, use entry as baseline so breakeven triggers
             current_sl = sl if sl and sl > 0 else entry
-            if target_sl >= current_sl:
+            if target_sl >= current_sl - 0.00001:  # small buffer for float comparison
                 return None
 
             logger.info(
@@ -423,9 +394,15 @@ class PositionMonitor:
         result = update_position_sl_tp_unified(self.client, pos, new_sl=decision.new_sl)
 
         if result.success:
+            # Update the tracker's stop_loss so next cycle compares against the new SL
+            deal_id = str(pos.deal_id)
+            tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
+            if tracked is not None:
+                tracked.stop_loss = decision.new_sl
+
             logger.info(
-                "Trailing stop applied: %s %s new SL=%.2f",
-                pos.direction, pos.epic, decision.new_sl,
+                "Trailing stop applied: %s %s SL %.2f -> %.2f",
+                pos.direction, pos.epic, pos.stop_level or 0, decision.new_sl,
             )
         else:
             logger.error(

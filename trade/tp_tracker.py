@@ -129,7 +129,7 @@ class TPProgress:
 
         if low is not None:
             mae_pnl = self.calculate_pnl(low)
-            if mae_pnl < self.mae_mae or self.mae_pnl == 0:
+            if mae_pnl < self.mae_pnl or self.mae_pnl == 0:
                 self.mae_pnl = mae_pnl
                 self.mae_price = low
                 result["mae_updated"] = True
@@ -154,9 +154,9 @@ class TPProgress:
         Returns (should_evaluate, reason).
 
         Triggers when:
-        - TP progress reaches 60% (first time)
+        - TP progress reaches 40% (first time)
         - TP progress drops 10% from highest (trend reversing)
-        - Position is already above 60% when first tracked (first check)
+        - Position is already above 40% when first tracked (first check)
         """
         progress = self.calculate_progress(current_price)
 
