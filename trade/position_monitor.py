@@ -251,8 +251,8 @@ class PositionMonitor:
                 tracked_strength_score = strength_result.score
 
                 if strength_result.score == 50.0 and strength_result.reason == "No data for evaluation":
-                    logger.warning("Strength evaluation returned no-data for %s %s - cannot close", pos.direction, pos.epic)
-                    # Fall through to trailing stop check
+                    logger.warning("Strength evaluation returned no-data for %s %s - using score=50", pos.direction, pos.epic)
+                    # tracked_strength_score is already 50.0, continue to record it
 
                 components_dict = (
                     strength_result.components.to_dict()
@@ -284,7 +284,8 @@ class PositionMonitor:
             except Exception as e:
                 import traceback
                 logger.error("Strength evaluation failed for %s: %s\n%s", pos.epic, e, traceback.format_exc())
-                # Fall through to trailing stop check
+                # Set score to None on error to indicate evaluation failed
+                tracked_strength_score = None
         elif (should_eval or force_eval) and not df_provider:
             logger.warning("Strength evaluation skipped: no df_provider for %s", pos.epic)
 
