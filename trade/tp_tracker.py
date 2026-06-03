@@ -170,7 +170,8 @@ class TPProgress:
                 )
                 return True, f"TP progress reached 40% (current: {progress:.1%})"
             # If progress is >= 40% but no strength scores recorded yet (first check for existing position)
-            elif not self.strength_scores and self.last_checked is None:
+            # Note: last_checked is set during update(), so we only check strength_scores here
+            elif not self.strength_scores:
                 logger.info(
                     "Strength eval triggered: Already at %.1f%% with no prior evaluation",
                     progress * 100,

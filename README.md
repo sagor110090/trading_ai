@@ -295,20 +295,20 @@ Tracks **MFE** (Max Favorable Excursion) and **MAE** (Max Adverse Excursion) for
 
 ```bash
 # Single cycle
-python -m trading_ai.main
+python main.py
 
 # Continuous loop
-python -m trading_ai.main --loop
+python main.py --loop
 
 # Custom interval (seconds)
-python -m trading_ai.main --loop --interval 300
+python main.py --loop --interval 300
 ```
 
 ### Historical Backfill
 
 ```bash
 # Default: 4 weeks, every M5 candle
-python -m trading_ai.backtest_historical
+python backtest_historical.py
 
 # Options
 --weeks 4               # Weeks of historical data
@@ -318,18 +318,31 @@ python -m trading_ai.backtest_historical
 --reset                 # Clear existing signals & ML models first
 
 # Examples
-python -m trading_ai.backtest_historical --weeks 4 --symbol ETHUSD
-python -m trading_ai.backtest_historical --symbol EURUSD --mode scalping --reset
+python backtest_historical.py --weeks 4 --symbol ETHUSD
+python backtest_historical.py --symbol EURUSD --mode scalping --reset
+```
+
+### ML Model Management
+
+```bash
+# Retrain all models manually (with class weights for imbalance)
+python retrain_ml.py
+
+# Retrain specific symbol/model
+python retrain_ml.py --symbols BTCUSD XAUUSD --models catboost
+
+# Check database statistics
+python check_db_stats.py
 ```
 
 ### View Signals
 
 ```bash
 # Last 20 signals
-python -m trading_ai.signals_cmd
+python signals_cmd.py
 
 # Last 50 signals
-python -m trading_ai.signals_cmd 50
+python signals_cmd.py 50
 ```
 
 ---

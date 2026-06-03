@@ -242,9 +242,13 @@ class PositionMonitor:
                 pos.direction, pos.epic, tp_progress * 100, should_eval, force_eval, df_provider is not None, deal_id,
             )
 
+        # Track strength score for the final decision
+        tracked_strength_score = None
+
         if (should_eval or force_eval) and df_provider:
             try:
                 strength_result = self._evaluate_strength(pos, df_provider)
+                tracked_strength_score = strength_result.score
 
                 if strength_result.score == 50.0 and strength_result.reason == "No data for evaluation":
                     logger.warning("Strength evaluation returned no-data for %s %s - cannot close", pos.direction, pos.epic)
@@ -297,6 +301,7 @@ class PositionMonitor:
             direction=pos.direction,
             tp_progress=tp_progress,
             pnl=pnl,
+            strength_score=tracked_strength_score,
         )
 
     def _check_trailing_stop(
