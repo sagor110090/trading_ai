@@ -1,0 +1,5 @@
+backtest cmd:-
+python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol US30
+
+train modal cmd:- 
+ python retrain_ml.py --symbols AUDUSD

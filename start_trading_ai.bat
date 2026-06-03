@@ -8,9 +8,5 @@ set PYTHONPATH=C:\Users\mehed\Herd
 REM Wait 30s for MT5 terminal to fully load first
 timeout /t 30 /nobreak >nul
 
-:loop
-"%PYTHON_PATH%" -m trading_ai.main
-echo.
-echo Restarting in 60 seconds...
-timeout /t 60 /nobreak >nul
-goto loop
+REM Run in loop mode with background position monitor
+"%PYTHON_PATH%" -m trading_ai.main --loop --interval 300

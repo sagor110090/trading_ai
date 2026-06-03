@@ -694,7 +694,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--symbol", type=str, default=None,
-        choices=["XAUUSD", "BTCUSD", "ETHUSD", "EURUSD", "GBPUSD", "XAGUSD", "USDJPY", "USDCHF", "EURGBP", "EURJPY", "GBPJPY", "AUDUSD", "NZDUSD", "USDCAD"],
+        choices=["XAUUSD", "BTCUSD", "ETHUSD", "EURUSD", "GBPUSD", "XAGUSD", "USDJPY", "USDCHF", "EURGBP", "EURJPY", "GBPJPY", "AUDUSD", "NZDUSD", "USDCAD", "US30", "US500", "NAS100"],
         help="Symbol (default: from .env SYMBOLS)"
     )
     parser.add_argument(

@@ -19,6 +19,11 @@ class Symbol(str, Enum):
     XAUUSD = "XAUUSD"
     XAGUSD = "XAGUSD"
 
+    # Indices
+    US30 = "US30"
+    US500 = "US500"
+    NAS100 = "NAS100"
+
     # Forex Majors
     EURUSD = "EURUSD"
     GBPUSD = "GBPUSD"
