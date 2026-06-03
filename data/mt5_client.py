@@ -39,6 +39,10 @@ _SYMBOL_MAP: dict[Symbol, str] = {
     Symbol.USDCAD: "USDCAD",
     # Metals
     Symbol.XAGUSD: "XAGUSD",
+    # Indices
+    Symbol.US30: "US30",
+    Symbol.US500: "US500",
+    Symbol.NAS100: "NAS100",
 }
 
 
