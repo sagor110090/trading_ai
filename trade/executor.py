@@ -454,8 +454,8 @@ def check_timeouts(client: CapitalComClient) -> list[CloseResult]:
 
 # ==================== MT5 FUNCTIONS ====================
 
-from trading_ai.data.mt5_client import place_order as mt5_place_order, close_position as mt5_close_position
-from trading_ai.data.mt5_client import update_position_levels as mt5_update_position_levels
+from data.mt5_client import place_order as mt5_place_order, close_position as mt5_close_position
+from data.mt5_client import update_position_levels as mt5_update_position_levels
 
 
 def mt5_get_open_positions(client) -> list[OpenPosition]:

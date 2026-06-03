@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 
 from config.settings import Session
-from trading_ai.indicators.ema import add_ema_columns
-from trading_ai.indicators.rsi import add_rsi_column
-from trading_ai.indicators.macd import add_macd_columns
-from trading_ai.indicators.atr import add_atr_column
+from indicators.ema import add_ema_columns
+from indicators.rsi import add_rsi_column
+from indicators.macd import add_macd_columns
+from indicators.atr import add_atr_column
 
 logger = logging.getLogger(__name__)
 

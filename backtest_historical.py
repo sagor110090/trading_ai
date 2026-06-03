@@ -295,7 +295,7 @@ def backfill_signals(
 
     # Create appropriate client based on platform
     if SETTINGS.trading_platform == TradingPlatform.MT5:
-        from trading_ai.data.mt5_client import MT5Client
+        from data.mt5_client import MT5Client
         client = MT5Client()
         if not client.connect():
             console.print("[bold red]✗ MT5 connection failed[/]")

@@ -28,8 +28,8 @@ from trade.executor import (
     get_open_positions_unified,
     update_position_sl_tp_unified,
 )
-from trading_ai.trade.strength_score import TradeStrengthScore, StrengthScoreComponents, StrengthScoreResult
-from trading_ai.trade.tp_tracker import TPProgressTracker
+from trade.strength_score import TradeStrengthScore, StrengthScoreComponents, StrengthScoreResult
+from trade.tp_tracker import TPProgressTracker
 
 logger = logging.getLogger(__name__)
 
