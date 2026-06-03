@@ -790,7 +790,7 @@ def _monitor_loop(
     """Background loop that runs the position monitor every `interval` seconds.
 
     This runs independently of the main signal cycle so open positions are
-    tracked more frequently (default 60s) for better TP / strength decisions.
+    tracked more frequently (default 30s) for better TP / strength decisions.
     A lock prevents overlap with the main cycle.
     """
     import time
@@ -825,7 +825,7 @@ def run_loop(client: CapitalComClient, position_manager: PositionManager, positi
     This keeps the PositionManager alive between cycles so cooldowns
     and position state persist correctly.
 
-    A background thread also runs the position monitor every 60s so open
+    A background thread also runs the position monitor every 30s so open
     positions are tracked more frequently than the main cycle.
     """
     import time
@@ -833,12 +833,12 @@ def run_loop(client: CapitalComClient, position_manager: PositionManager, positi
 
     monitor_thread = threading.Thread(
         target=_monitor_loop,
-        args=(client, position_manager, position_monitor, 60),
+        args=(client, position_manager, position_monitor, SETTINGS.position_monitor_interval),
         daemon=True,
         name="position-monitor",
     )
     monitor_thread.start()
-    console.print("[cyan]Position monitor running every 60s (background thread)[/]")
+    console.print(f"[cyan]Position monitor running every {SETTINGS.position_monitor_interval}s (background thread)[/]")
 
     while True:
         try:

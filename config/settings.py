@@ -280,6 +280,7 @@ class Settings:
 
     symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
+    position_monitor_interval: int = 30  # Seconds between position monitor checks
     log_level: str = "INFO"
 
 
@@ -375,6 +376,7 @@ def load_settings() -> Settings:
         auto_trade=auto_trade,
         trade_sizes=trade_sizes,
         symbols=symbols,
+        position_monitor_interval=int(os.getenv("POSITION_MONITOR_INTERVAL", "30")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
     )
 

@@ -25,15 +25,22 @@ if "%TRADE_MODE%"=="" set TRADE_MODE=day_trading
 set TRADE_MODE=%TRADE_MODE:"=%
 set TRADE_MODE=%TRADE_MODE: =%
 
+REM Read position monitor interval
+for /f "tokens=2 delims==" %%A in ('findstr /R "^POSITION_MONITOR_INTERVAL=" .env 2^>nul') do set MONITOR_INTERVAL=%%A
+if "%MONITOR_INTERVAL%"=="" set MONITOR_INTERVAL=30
+
+set MONITOR_INTERVAL=%MONITOR_INTERVAL:"=%
+set MONITOR_INTERVAL=%MONITOR_INTERVAL: =%
+
 echo ==========================================
 echo   Trading AI  ^|  Mode: %TRADE_MODE%
 echo   Database: SQLite (trading_ai.db)
 echo   Main cycle:    every %INTERVAL% seconds
-echo   Position monitor: every 60 seconds (background)
+echo   Position monitor: every %MONITOR_INTERVAL% seconds (background)
 echo   Press Ctrl+C to stop
 echo ==========================================
 
 REM Use --loop so a single Python process stays alive.
-REM This lets the background position-monitor thread tick every 60s
+REM This lets the background position-monitor thread tick every %MONITOR_INTERVAL%s
 REM while the main signal cycle runs every %INTERVAL% seconds.
 "%PYTHON_PATH%" -m trading_ai.main --loop --interval %INTERVAL%
