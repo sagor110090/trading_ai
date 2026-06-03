@@ -202,6 +202,8 @@ class MLConfig:
         "subsample": 0.8,
         "eval_metric": "Logloss",
         "verbose": 0,
+        # Auto class weights to handle imbalance (70% losses, 30% wins)
+        "auto_class_weights": "Balanced",
     })
     model_dir: str = ""  # Set dynamically in load_settings() to absolute path
     # ML prediction threshold: only take trades where ML probability >= this value

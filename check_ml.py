@@ -1,8 +1,8 @@
 import os
 os.environ.setdefault("USE_SQLITE", "true")
 
-from trading_ai.data.database import get_session
-from trading_ai.data.models import MLModelMeta
+from data.database import get_session
+from data.models import MLModelMeta
 
 with get_session() as session:
     models = session.query(MLModelMeta).filter(

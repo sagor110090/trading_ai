@@ -22,11 +22,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from trading_ai.config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
-from trading_ai.data.collector import CapitalComClient
-from trading_ai.data.database import get_session
-from trading_ai.data.models import Signal, SignalVerification
-from trading_ai.trade.executor import (
+from config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
+from data.collector import CapitalComClient
+from data.database import get_session
+from data.models import Signal, SignalVerification
+from trade.executor import (
     OpenPosition,
     close_position,
     get_open_positions,
@@ -229,7 +229,7 @@ class PositionManager:
             deal_reference: Optional[str]
             closed_position: Optional[str]  # if we reversed
         """
-        from trading_ai.trade.executor import place_trade_unified
+        from trade.executor import place_trade_unified
 
         result = {
             "success": False,
@@ -338,7 +338,7 @@ class PositionManager:
         """Get the broker symbol identifier for the active platform."""
         if SETTINGS.trading_platform == TradingPlatform.MT5:
             return symbol
-        from trading_ai.data.collector import _EPIC_MAP
+        from data.collector import _EPIC_MAP
         try:
             symbol_enum = Symbol(symbol)
             return _EPIC_MAP.get(symbol_enum)

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from trading_ai.config.settings import SETTINGS, SignalType
+from config.settings import SETTINGS, SignalType
 
 logger = logging.getLogger(__name__)
 

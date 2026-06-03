@@ -11,11 +11,11 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.data.database import get_engine
-from trading_ai.data.models import MLModelMeta
-from trading_ai.indicators.features import FeatureSet
-from trading_ai.signals.engine import TradeSignal
+from config.settings import SETTINGS
+from data.database import get_engine
+from data.models import MLModelMeta
+from indicators.features import FeatureSet
+from signals.engine import TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,10 @@ class Prediction:
 def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
     """Load the best active model for a symbol/timeframe.
 
-    Returns (model, feature_columns, model_meta) or None.
+    Returns (model, feature_columns, model_info) or None,
+    where model_info is a dict with the model metadata.
     """
-    from trading_ai.data.database import get_session
+    from data.database import get_session
     try:
         with get_session() as session:
             # Prefer best AUC among active models for this symbol/timeframe
@@ -57,7 +58,21 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
             if not meta:
                 return None
 
-            filepath = meta.filepath
+            # Extract all needed data while session is open
+            model_info = {
+                "model_type": meta.model_type,
+                "version": meta.version,
+                "filepath": meta.filepath,
+                "accuracy": meta.accuracy,
+                "precision": meta.precision,
+                "recall": meta.recall,
+                "f1": meta.f1,
+                "roc_auc": meta.roc_auc,
+                "train_signal_count": meta.train_signal_count,
+                "trained_at": meta.trained_at,
+            }
+
+            filepath = model_info["filepath"]
             # Resolve relative paths against MODEL_DIR
             if not os.path.isabs(filepath):
                 filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
@@ -74,7 +89,7 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
             else:
                 feature_cols = None
 
-            return model, feature_cols, meta
+            return model, feature_cols, model_info
 
     except Exception as e:
         logger.error("Failed to load model: %s", e)
@@ -105,7 +120,7 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         logger.info("No active ML model for %s %s", signal.symbol, signal.timeframe)
         return None
 
-    model, feature_cols, meta = result
+    model, feature_cols, model_info = result
 
     # Build feature vector from signal's feature snapshot
     features = signal.features.to_dict()
@@ -144,15 +159,15 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         signal=signal.signal.value,
         confidence=round(ml_confidence, 2),
         probability=round(float(proba), 4),
-        model_type=meta.model_type,
-        model_version=meta.version,
+        model_type=model_info["model_type"],
+        model_version=model_info["version"],
         feature_count=X.shape[1],
     )
 
     logger.info(
         "ML prediction: %s prob=%.4f ml_conf=%.2f (rule_conf=%.2f) model=%s_v%d",
         signal.signal.value, proba, ml_confidence, signal.confidence,
-        meta.model_type, meta.version,
+        model_info["model_type"], model_info["version"],
     )
 
     return prediction

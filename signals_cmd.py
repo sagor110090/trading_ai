@@ -4,8 +4,8 @@ import sys
 import os
 os.environ.setdefault("USE_SQLITE", "true")
 
-from trading_ai.data.database import get_session
-from trading_ai.data.models import Signal, SignalVerification
+from data.database import get_session
+from data.models import Signal, SignalVerification
 
 
 def show_signals(limit: int = 20):

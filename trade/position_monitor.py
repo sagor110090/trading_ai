@@ -19,10 +19,10 @@ from typing import Optional
 
 import pandas as pd
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.data.database import get_session
-from trading_ai.data.models import TradeLog
-from trading_ai.trade.executor import (
+from config.settings import SETTINGS
+from data.database import get_session
+from data.models import TradeLog
+from trade.executor import (
     OpenPosition,
     close_position_unified,
     get_open_positions_unified,
@@ -438,7 +438,7 @@ class PositionMonitor:
 
         # Compute features if not already present
         if "ema20" not in df.columns:
-            from trading_ai.indicators.features import compute_all_features
+            from indicators.features import compute_all_features
             df = compute_all_features(df)
 
         # Evaluate strength

@@ -16,11 +16,11 @@ from typing import Optional
 import pandas as pd
 from rich.logging import RichHandler
 
-from trading_ai.config.settings import SETTINGS, Symbol, Timeframe, TradingPlatform
-from trading_ai.data.collector import CapitalComClient
-from trading_ai.data.database import create_tables, get_session
-from trading_ai.data.models import Candle, Signal, SignalVerification
-from trading_ai.display import (
+from config.settings import SETTINGS, Symbol, Timeframe, TradingPlatform
+from data.collector import CapitalComClient
+from data.database import create_tables, get_session
+from data.models import Candle, Signal, SignalVerification
+from display import (
     console,
     display_auto_train_result,
     display_auto_train_skipped,
@@ -45,17 +45,17 @@ from trading_ai.display import (
     display_trade_skipped_existing,
     display_verification_summary,
 )
-from trading_ai.indicators.features import compute_all_features
-from trading_ai.ml.predictor import Prediction, predict_signal
-from trading_ai.signals.engine import TradeSignal, generate_signal
-from trading_ai.trade.executor import (
+from indicators.features import compute_all_features
+from ml.predictor import Prediction, predict_signal
+from signals.engine import TradeSignal, generate_signal
+from trade.executor import (
     close_position_unified,
     place_trade_unified,
 )
-from trading_ai.trade.position_manager import PositionManager
-from trading_ai.trade.position_monitor import PositionMonitor
+from trade.position_manager import PositionManager
+from trade.position_monitor import PositionMonitor
 from rich.panel import Panel
-from trading_ai.verification.verifier import verify_pending_signals
+from verification.verifier import verify_pending_signals
 
 logger = logging.getLogger(__name__)
 
@@ -250,8 +250,8 @@ def _check_position_strength(
 
     Also logs decisions to the trade log database.
     """
-    from trading_ai.indicators.features import compute_all_features
-    from trading_ai.display import display_position_strength_exit
+    from indicators.features import compute_all_features
+    from display import display_position_strength_exit
     from rich.table import Table
 
     def df_provider(symbol: str, timeframe: str) -> pd.DataFrame:
@@ -601,7 +601,7 @@ def _handle_trade_decision(
     3. Opposite direction position → close old, place new (reversal) (returns True)
     4. Cooldown active → skip (returns False)
     """
-    from trading_ai.trade.executor import OrderResult
+    from trade.executor import OrderResult
 
     decision = position_manager.evaluate_trade(
         trade_signal.symbol,
@@ -700,7 +700,7 @@ def _check_timeouts(
     symbol: str,
 ) -> None:
     """Check open positions and close any that exceeded their max hold time."""
-    from trading_ai.trade.executor import check_timeouts_unified
+    from trade.executor import check_timeouts_unified
 
     max_minutes = SETTINGS.get_max_hold_minutes()
     results = check_timeouts_unified(client)
@@ -721,8 +721,8 @@ def _check_timeouts(
 
 def _try_auto_train(symbol: str, stats: dict) -> None:
     """Auto-train ML models if enough verified signals exist."""
-    from trading_ai.backtesting.walk_forward import run_walk_forward
-    from trading_ai.data.models import MLModelMeta, SignalVerification
+    from backtesting.walk_forward import run_walk_forward
+    from data.models import MLModelMeta, SignalVerification
 
     with get_session() as session:
         verified_count = (

@@ -4,9 +4,9 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from trading_ai.config.settings import SETTINGS, SignalResult, SignalType, Timeframe
-from trading_ai.data.database import get_session
-from trading_ai.data.models import Candle, Signal, SignalVerification
+from config.settings import SETTINGS, SignalResult, SignalType, Timeframe
+from data.database import get_session
+from data.models import Candle, Signal, SignalVerification
 
 logger = logging.getLogger(__name__)
 

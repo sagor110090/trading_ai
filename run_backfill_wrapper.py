@@ -10,7 +10,7 @@ parent_dir = os.path.dirname(current_dir)
 # Add parent to path FIRST so Python can find the trading_ai package
 sys.path.insert(0, parent_dir)
 
-# Now imports like "from trading_ai.config.settings" will work
+# Now imports like "from config.settings" will work
 # We need to change to current_dir so any relative paths in the script work
 os.chdir(current_dir)
 

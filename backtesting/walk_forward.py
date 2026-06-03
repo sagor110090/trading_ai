@@ -14,9 +14,9 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.ml.dataset import TARGET_COLUMN, build_dataset, split_features_target
-from trading_ai.ml.trainer import (
+from config.settings import SETTINGS
+from ml.dataset import TARGET_COLUMN, build_dataset, split_features_target
+from ml.trainer import (
     ModelMetrics,
     _compute_metrics,
     _ensure_model_dir,
@@ -171,7 +171,7 @@ def _percentage_split_folds(
     and assigns each block to train or test, maintaining temporal order
     within each split.
     """
-    from trading_ai.ml.dataset import TARGET_COLUMN
+    from ml.dataset import TARGET_COLUMN
 
     n = len(df)
 
@@ -270,7 +270,7 @@ def _oversampled_split(
     keeps test set as-is (no synthetic data in evaluation).
     """
     from sklearn.utils import resample
-    from trading_ai.ml.dataset import TARGET_COLUMN
+    from ml.dataset import TARGET_COLUMN
 
     n = len(df)
     train_ratio = 0.7

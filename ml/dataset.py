@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from trading_ai.config.settings import SignalResult
-from trading_ai.data.database import get_engine
-from trading_ai.data.models import Signal, SignalVerification
+from config.settings import SignalResult
+from data.database import get_engine
+from data.models import Signal, SignalVerification
 
 logger = logging.getLogger(__name__)
 

@@ -8,9 +8,9 @@ from typing import Optional, Union
 
 import requests
 
-from trading_ai.config.settings import SETTINGS, SignalType, Symbol, TradeMode, TradingPlatform
-from trading_ai.data.collector import CapitalComClient, _EPIC_MAP
-from trading_ai.signals.engine import TradeSignal
+from config.settings import SETTINGS, SignalType, Symbol, TradeMode, TradingPlatform
+from data.collector import CapitalComClient, _EPIC_MAP
+from signals.engine import TradeSignal
 
 logger = logging.getLogger(__name__)
 

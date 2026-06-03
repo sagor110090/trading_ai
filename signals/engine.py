@@ -13,11 +13,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from trading_ai.config.settings import (
+from config.settings import (
     SETTINGS, SignalType, Symbol, Timeframe, TradeMode,
 )
-from trading_ai.indicators.features import FeatureSet, compute_all_features, extract_feature_set
-from trading_ai.signals.scoring import FactorScores, compute_signal_scores
+from indicators.features import FeatureSet, compute_all_features, extract_feature_set
+from signals.scoring import FactorScores, compute_signal_scores
 
 logger = logging.getLogger(__name__)
 

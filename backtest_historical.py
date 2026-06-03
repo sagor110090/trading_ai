@@ -27,12 +27,12 @@ from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
-from trading_ai.config.settings import SETTINGS, Symbol, Timeframe, TradeMode, TradingPlatform
-from trading_ai.data.collector import CapitalComClient
-from trading_ai.data.database import create_tables, get_session
-from trading_ai.data.models import Candle, Signal, SignalVerification
-from trading_ai.signals.engine import generate_signal, TradeSignal
-from trading_ai.verification.verifier import verify_signal
+from config.settings import SETTINGS, Symbol, Timeframe, TradeMode, TradingPlatform
+from data.collector import CapitalComClient
+from data.database import create_tables, get_session
+from data.models import Candle, Signal, SignalVerification
+from signals.engine import generate_signal, TradeSignal
+from verification.verifier import verify_signal
 
 console = Console()
 
@@ -598,7 +598,7 @@ def run_backfill(
                     session.query(Signal).filter(Signal.symbol == sym.value).delete(synchronize_session=False)
                     console.print(f"  [yellow]Cleared signals & verifications for {sym.value}[/]")
                 # Also delete ML model meta for this symbol
-                from trading_ai.data.models import MLModelMeta
+                from data.models import MLModelMeta
                 session.query(MLModelMeta).filter(MLModelMeta.symbol == sym.value).delete(synchronize_session=False)
         console.print()
 
@@ -646,8 +646,8 @@ def run_backfill(
             f"\n[bold cyan]🔄 Training ML models on "
             f"{total_stats['verified']} verified signals...[/]"
         )
-        from trading_ai.backtesting.walk_forward import run_walk_forward
-        from trading_ai.display import display_auto_train_result
+        from backtesting.walk_forward import run_walk_forward
+        from display import display_auto_train_result
 
         for sym in symbols:
             try:

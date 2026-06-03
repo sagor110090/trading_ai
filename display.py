@@ -13,10 +13,10 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.ml.predictor import Prediction
-from trading_ai.signals.engine import TradeSignal
-from trading_ai.trade.executor import OrderResult
+from config.settings import SETTINGS
+from ml.predictor import Prediction
+from signals.engine import TradeSignal
+from trade.executor import OrderResult
 
 # Shared console instance
 console = Console()
@@ -243,7 +243,7 @@ def display_auto_train_result(model_type: str, symbol: str, accuracy: float, auc
 
 def display_timeout_closed(position: "OpenPosition", hold_minutes: float, max_minutes: int) -> None:
     """Show a position that was closed due to timeout."""
-    from trading_ai.trade.executor import OpenPosition as OP  # avoid circular import
+    from trade.executor import OpenPosition as OP  # avoid circular import
     dir_style = "[bold green]BUY[/]" if position.direction == "BUY" else "[bold red]SELL[/]"
     content = (
         f"  ⏰ [yellow]TIMEOUT[/]  {dir_style} [white]{position.epic}[/]\n"

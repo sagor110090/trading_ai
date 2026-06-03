@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import create_engine, text
-from trading_ai.config.settings import SETTINGS
-from trading_ai.data.database import create_tables
+from config.settings import SETTINGS
+from data.database import create_tables
 
 SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_ai.db")
 

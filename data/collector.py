@@ -7,7 +7,7 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from trading_ai.config.settings import SETTINGS, Symbol, Timeframe
+from config.settings import SETTINGS, Symbol, Timeframe
 
 logger = logging.getLogger(__name__)
 

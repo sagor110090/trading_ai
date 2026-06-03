@@ -18,10 +18,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.data.database import get_session
-from trading_ai.data.models import MLModelMeta
-from trading_ai.ml.dataset import FEATURE_COLUMNS, build_dataset, split_features_target
+from config.settings import SETTINGS
+from data.database import get_session
+from data.models import MLModelMeta
+from ml.dataset import FEATURE_COLUMNS, build_dataset, split_features_target
 
 logger = logging.getLogger(__name__)
 

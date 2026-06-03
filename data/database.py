@@ -8,8 +8,8 @@ from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from trading_ai.config.settings import SETTINGS
-from trading_ai.data.models import Base
+from config.settings import SETTINGS
+from data.models import Base
 
 logger = logging.getLogger(__name__)
 
