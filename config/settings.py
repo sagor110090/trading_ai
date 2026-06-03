@@ -211,9 +211,9 @@ class MLConfig:
         "auto_class_weights": "Balanced",
     })
     model_dir: str = ""  # Set dynamically in load_settings() to absolute path
-    # ML prediction threshold: only take trades where ML probability >= this value
-    # 0.0 = take all trades (ML disabled), 0.3 = moderate filter, 0.5 = strict
-    prediction_threshold: float = 0.3
+    # ML prediction thresholds per symbol (read from .env)
+    # Default threshold and per-symbol overrides
+    prediction_thresholds: dict = field(default_factory=lambda: {"DEFAULT": 0.3})
     # Minimum verified signals before ML predictions are used for filtering
     # Below this count, ML predictions are logged but don't block trades
     min_verified_for_filter: int = 50
@@ -264,6 +264,10 @@ class Settings:
     def get_trade_size(self, symbol: str) -> float:
         """Get position size for a symbol. Falls back to DEFAULT."""
         return self.trade_sizes.get(symbol, self.trade_sizes.get("DEFAULT", 0.01))
+
+    def get_prediction_threshold(self, symbol: str) -> float:
+        """Get ML prediction threshold for a symbol. Falls back to DEFAULT."""
+        return self.ml.prediction_thresholds.get(symbol, self.ml.prediction_thresholds.get("DEFAULT", 0.3))
 
     def get_max_hold_minutes(self) -> int:
         """Get max hold time in minutes for the current trade mode."""
@@ -349,15 +353,24 @@ def load_settings() -> Settings:
 
     # Model directory — absolute path so it works regardless of CWD
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
-    prediction_threshold = float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))
     auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
+
+    # Read all ML_PREDICTION_THRESHOLD_<SYMBOL> from env
+    prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))}
+    for key, value in os.environ.items():
+        if key.startswith("ML_PREDICTION_THRESHOLD_") and key != "ML_PREDICTION_THRESHOLD_DEFAULT":
+            symbol_name = key.replace("ML_PREDICTION_THRESHOLD_", "")
+            try:
+                prediction_thresholds[symbol_name] = float(value)
+            except ValueError:
+                pass
 
     return Settings(
         capital_com=cap_cfg,
         mt5=mt5_cfg,
         trading_platform=trading_platform,
         database=db_cfg,
-        ml=MLConfig(model_dir=model_dir, prediction_threshold=prediction_threshold, auto_train=auto_train),
+        ml=MLConfig(model_dir=model_dir, prediction_thresholds=prediction_thresholds, auto_train=auto_train),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         trade_sizes=trade_sizes,

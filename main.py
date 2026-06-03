@@ -520,13 +520,14 @@ def run_signal_cycle(
                     prediction = predict_signal(trade_signal)
                     if prediction:
                         stats["ml_prediction"] = prediction
-                        if prediction.probability < SETTINGS.ml.prediction_threshold:
+                        threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
+                        if prediction.probability < threshold:
                             should_trade = False
                             stats["ml_blocked"] = True
-                            display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=True)
+                            display_ml_prediction(prediction, threshold, blocked=True)
                         else:
                             stats["ml_approved"] = True
-                            display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=False)
+                            display_ml_prediction(prediction, threshold, blocked=False)
                     else:
                         stats["no_ml"] = True
                         display_no_ml_model()
@@ -560,13 +561,14 @@ def run_signal_cycle(
                 prediction = predict_signal(trade_signal)
                 if prediction:
                     stats["ml_prediction"] = prediction
-                    if prediction.probability < SETTINGS.ml.prediction_threshold:
+                    threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
+                    if prediction.probability < threshold:
                         should_trade = False
                         stats["ml_blocked"] = True
-                        display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=True)
+                        display_ml_prediction(prediction, threshold, blocked=True)
                     else:
                         stats["ml_approved"] = True
-                        display_ml_prediction(prediction, SETTINGS.ml.prediction_threshold, blocked=False)
+                        display_ml_prediction(prediction, threshold, blocked=False)
                 else:
                     stats["no_ml"] = True
                     display_no_ml_model()
