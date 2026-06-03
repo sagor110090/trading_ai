@@ -104,46 +104,39 @@ def _setup_logging() -> None:
 
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     """Store fetched candles into the database. Returns count of new candles inserted."""
-    session_gen = get_session()
-    session = next(session_gen)
     count = 0
 
-    for _, row in df.iterrows():
-        ts = row["timestamp"]
-        if isinstance(ts, str):
-            ts = pd.Timestamp(ts, tz="UTC")
+    with get_session() as session:
+        for _, row in df.iterrows():
+            ts = row["timestamp"]
+            if isinstance(ts, str):
+                ts = pd.Timestamp(ts, tz="UTC")
 
-        exists = (
-            session.query(Candle)
-            .filter(
-                Candle.symbol == symbol,
-                Candle.timeframe == timeframe,
-                Candle.timestamp == ts,
+            exists = (
+                session.query(Candle)
+                .filter(
+                    Candle.symbol == symbol,
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp == ts,
+                )
+                .first()
             )
-            .first()
-        )
-        if exists:
-            continue
+            if exists:
+                continue
 
-        candle = Candle(
-            symbol=symbol,
-            timeframe=timeframe,
-            timestamp=ts,
-            open_price=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=float(row.get("volume", 0) or 0),
-            spread=float(row.get("spread", 0) or 0),
-        )
-        session.add(candle)
-        count += 1
-
-    try:
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
+            candle = Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                timestamp=ts,
+                open_price=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0) or 0),
+                spread=float(row.get("spread", 0) or 0),
+            )
+            session.add(candle)
+            count += 1
 
     return count
 
@@ -156,96 +149,89 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
     """
     from sqlalchemy.exc import IntegrityError
 
-    session_gen = get_session()
-    session = next(session_gen)
-
-    # Check if already stored (same signal_id from a previous cycle)
-    existing = (
-        session.query(Signal)
-        .filter(Signal.signal_id == trade_signal.signal_id)
-        .first()
-    )
-    if existing:
-        logger.debug("Signal %s already in DB, skipping insert", trade_signal.signal_id[:8])
-        return existing
-
-    features = trade_signal.features.to_dict()
-
-    signal = Signal(
-        signal_id=trade_signal.signal_id,
-        symbol=trade_signal.symbol,
-        timeframe=trade_signal.timeframe,
-        signal=trade_signal.signal,
-        confidence=trade_signal.confidence,
-        entry=trade_signal.entry,
-        stop_loss=trade_signal.stop_loss,
-        take_profit=trade_signal.take_profit,
-        timestamp=trade_signal.timestamp,
-        ema20=features.get("ema20"),
-        ema50=features.get("ema50"),
-        ema200=features.get("ema200"),
-        rsi14=features.get("rsi14"),
-        macd_line=features.get("macd_line"),
-        macd_signal=features.get("macd_signal"),
-        macd_histogram=features.get("macd_histogram"),
-        atr14=features.get("atr14"),
-        candle_body_pct=features.get("candle_body_pct"),
-        upper_wick_pct=features.get("upper_wick_pct"),
-        lower_wick_pct=features.get("lower_wick_pct"),
-        dist_ema20=features.get("dist_ema20"),
-        dist_ema50=features.get("dist_ema50"),
-        dist_ema200=features.get("dist_ema200"),
-        trend_strength=features.get("trend_strength"),
-        momentum_score=features.get("momentum_score"),
-        session=features.get("session"),
-        spread=features.get("spread"),
-    )
-
-    session.add(signal)
-
-    try:
-        session.commit()
-    except IntegrityError:
-        session.rollback()
-        logger.debug("Signal %s duplicate on commit, skipping", trade_signal.signal_id[:8])
+    with get_session() as session:
+        # Check if already stored (same signal_id from a previous cycle)
         existing = (
             session.query(Signal)
             .filter(Signal.signal_id == trade_signal.signal_id)
             .first()
         )
-        return existing
-    except Exception:
-        session.rollback()
-        raise
+        if existing:
+            logger.debug("Signal %s already in DB, skipping insert", trade_signal.signal_id[:8])
+            return existing
 
-    return signal
+        features = trade_signal.features.to_dict()
+
+        signal = Signal(
+            signal_id=trade_signal.signal_id,
+            symbol=trade_signal.symbol,
+            timeframe=trade_signal.timeframe,
+            signal=trade_signal.signal,
+            confidence=trade_signal.confidence,
+            entry=trade_signal.entry,
+            stop_loss=trade_signal.stop_loss,
+            take_profit=trade_signal.take_profit,
+            timestamp=trade_signal.timestamp,
+            ema20=features.get("ema20"),
+            ema50=features.get("ema50"),
+            ema200=features.get("ema200"),
+            rsi14=features.get("rsi14"),
+            macd_line=features.get("macd_line"),
+            macd_signal=features.get("macd_signal"),
+            macd_histogram=features.get("macd_histogram"),
+            atr14=features.get("atr14"),
+            candle_body_pct=features.get("candle_body_pct"),
+            upper_wick_pct=features.get("upper_wick_pct"),
+            lower_wick_pct=features.get("lower_wick_pct"),
+            dist_ema20=features.get("dist_ema20"),
+            dist_ema50=features.get("dist_ema50"),
+            dist_ema200=features.get("dist_ema200"),
+            trend_strength=features.get("trend_strength"),
+            momentum_score=features.get("momentum_score"),
+            session=features.get("session"),
+            spread=features.get("spread"),
+        )
+
+        session.add(signal)
+
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            logger.debug("Signal %s duplicate on commit, skipping", trade_signal.signal_id[:8])
+            existing = (
+                session.query(Signal)
+                .filter(Signal.signal_id == trade_signal.signal_id)
+                .first()
+            )
+            return existing
+
+        return signal
 
 
 def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.DataFrame:
     """Load recent candles from the database into a DataFrame."""
-    session_gen = get_session()
-    session = next(session_gen)
+    with get_session() as session:
+        candles = (
+            session.query(Candle)
+            .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+            .order_by(Candle.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
 
-    candles = (
-        session.query(Candle)
-        .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
-        .order_by(Candle.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+        if not candles:
+            return pd.DataFrame()
 
-    if not candles:
-        return pd.DataFrame()
-
-    rows = [{
-        "timestamp": c.timestamp,
-        "open": c.open_price,
-        "high": c.high,
-        "low": c.low,
-        "close": c.close,
-        "volume": c.volume,
-        "spread": c.spread,
-    } for c in reversed(candles)]
+        rows = [{
+            "timestamp": c.timestamp,
+            "open": c.open_price,
+            "high": c.high,
+            "low": c.low,
+            "close": c.close,
+            "volume": c.volume,
+            "spread": c.spread,
+        } for c in reversed(candles)]
 
     return pd.DataFrame(rows)
 
@@ -462,14 +448,13 @@ def run_signal_cycle(
 
         # ── 2. Verify pending signals ────────────────────────────────────
         verified = verify_pending_signals(symbol.value)
-        pending_count = (
-            get_session()
-            .__next__()
-            .query(Signal)
-            .outerjoin(Signal.verification)
-            .filter(Signal.symbol == symbol.value, Signal.verification == None)
-            .count()
-        )
+        with get_session() as session:
+            pending_count = (
+                session.query(Signal)
+                .outerjoin(Signal.verification)
+                .filter(Signal.symbol == symbol.value, Signal.verification == None)
+                .count()
+            )
         display_verification_summary(verified, pending_count)
         stats["verified"] = verified
 
@@ -688,25 +673,24 @@ def _handle_trade_decision(
 
 def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
     """Check verified results from this cycle and register cooldowns for losses."""
-    session = next(get_session())
+    with get_session() as session:
+        # Find recently verified losses for this symbol
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
 
-    # Find recently verified losses for this symbol
-    from datetime import datetime, timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
-
-    recent_losses = (
-        session.query(SignalVerification)
-        .join(Signal, SignalVerification.signal_id == Signal.id)
-        .filter(
-            Signal.symbol == symbol,
-            SignalVerification.result == "LOSS",
-            SignalVerification.verified_at >= cutoff,
+        recent_losses = (
+            session.query(SignalVerification)
+            .join(Signal, SignalVerification.signal_id == Signal.id)
+            .filter(
+                Signal.symbol == symbol,
+                SignalVerification.result == "LOSS",
+                SignalVerification.verified_at >= cutoff,
+            )
+            .all()
         )
-        .all()
-    )
 
-    for loss in recent_losses:
-        position_manager.register_verified_result(symbol, "LOSS")
+        for loss in recent_losses:
+            position_manager.register_verified_result(symbol, "LOSS")
 
 
 def _check_timeouts(
@@ -740,34 +724,32 @@ def _try_auto_train(symbol: str, stats: dict) -> None:
     from trading_ai.backtesting.walk_forward import run_walk_forward
     from trading_ai.data.models import MLModelMeta, SignalVerification
 
-    session_gen = get_session()
-    session = next(session_gen)
-
-    verified_count = (
-        session.query(SignalVerification)
-        .join(Signal, SignalVerification.signal_id == Signal.id)
-        .filter(Signal.symbol == symbol)
-        .count()
-    )
-
-    min_signals = SETTINGS.walk_forward.min_signals
-
-    if verified_count < min_signals:
-        display_auto_train_waiting(verified_count, min_signals)
-        return
-
-    last_train_count = None
-    try:
-        latest_model = (
-            session.query(MLModelMeta)
-            .filter(MLModelMeta.symbol == symbol, MLModelMeta.is_active == True)
-            .order_by(MLModelMeta.version.desc())
-            .first()
+    with get_session() as session:
+        verified_count = (
+            session.query(SignalVerification)
+            .join(Signal, SignalVerification.signal_id == Signal.id)
+            .filter(Signal.symbol == symbol)
+            .count()
         )
-        if latest_model:
-            last_train_count = latest_model.train_signal_count
-    except Exception:
-        pass
+
+        min_signals = SETTINGS.walk_forward.min_signals
+
+        if verified_count < min_signals:
+            display_auto_train_waiting(verified_count, min_signals)
+            return
+
+        last_train_count = None
+        try:
+            latest_model = (
+                session.query(MLModelMeta)
+                .filter(MLModelMeta.symbol == symbol, MLModelMeta.is_active == True)
+                .order_by(MLModelMeta.version.desc())
+                .first()
+            )
+            if latest_model:
+                last_train_count = latest_model.train_signal_count
+        except Exception:
+            pass
 
     if last_train_count is not None and verified_count <= last_train_count:
         display_auto_train_skipped(verified_count, last_train_count)

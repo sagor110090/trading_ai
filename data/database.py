@@ -2,6 +2,7 @@
 
 import logging
 import os
+from contextlib import contextmanager
 from typing import Generator
 
 from sqlalchemy import create_engine
@@ -59,7 +60,9 @@ def get_session_factory() -> sessionmaker:
     return _session_factory
 
 
+@contextmanager
 def get_session() -> Generator[Session, None, None]:
+    """Context manager that properly commits and closes the session."""
     factory = get_session_factory()
     session = factory()
     try:
@@ -70,6 +73,15 @@ def get_session() -> Generator[Session, None, None]:
         raise
     finally:
         session.close()
+
+
+def get_raw_session() -> Session:
+    """Get a bare session for legacy code that manages its own commits.
+
+    IMPORTANT: Callers MUST commit and close the session themselves.
+    Prefer get_session() instead.
+    """
+    return get_session_factory()()
 
 
 def create_tables() -> None:

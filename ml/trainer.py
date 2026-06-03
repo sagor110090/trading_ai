@@ -233,37 +233,36 @@ def train_models(
 def _get_next_version(symbol: str, timeframe: Optional[str], model_type: str) -> int:
     """Get the next version number for a model type."""
     try:
-        session_gen = get_session()
-        session = next(session_gen)
-        latest = (
-            session.query(MLModelMeta)
-            .filter(
-                MLModelMeta.model_type == model_type,
-                MLModelMeta.symbol == symbol,
-                MLModelMeta.timeframe == timeframe,
+        with get_session() as session:
+            latest = (
+                session.query(MLModelMeta)
+                .filter(
+                    MLModelMeta.model_type == model_type,
+                    MLModelMeta.symbol == symbol,
+                    MLModelMeta.timeframe == timeframe,
+                )
+                .order_by(MLModelMeta.version.desc())
+                .first()
             )
-            .order_by(MLModelMeta.version.desc())
-            .first()
-        )
-        version = (latest.version + 1) if latest else 1
+            version = (latest.version + 1) if latest else 1
 
-        # Check if this version already exists (race condition or import)
-        existing = session.query(MLModelMeta).filter(
-            MLModelMeta.model_type == model_type,
-            MLModelMeta.symbol == symbol,
-            MLModelMeta.timeframe == timeframe,
-            MLModelMeta.version == version,
-        ).first()
-        if existing:
-            # Find the next available version
-            version = session.query(MLModelMeta.version).filter(
+            # Check if this version already exists (race condition or import)
+            existing = session.query(MLModelMeta).filter(
                 MLModelMeta.model_type == model_type,
                 MLModelMeta.symbol == symbol,
                 MLModelMeta.timeframe == timeframe,
-            ).order_by(MLModelMeta.version.desc()).first()
-            version = (version[0] + 1) if version else 1
+                MLModelMeta.version == version,
+            ).first()
+            if existing:
+                # Find the next available version
+                row = session.query(MLModelMeta.version).filter(
+                    MLModelMeta.model_type == model_type,
+                    MLModelMeta.symbol == symbol,
+                    MLModelMeta.timeframe == timeframe,
+                ).order_by(MLModelMeta.version.desc()).first()
+                version = (row[0] + 1) if row else 1
 
-        return version
+            return version
     except Exception:
         return 1
 
@@ -278,9 +277,7 @@ def _store_model_meta(
     train_signal_count: Optional[int] = None,
 ) -> None:
     """Store model metadata in the database."""
-    session_gen = get_session()
-    session = next(session_gen)
-    try:
+    with get_session() as session:
         # Deactivate previous active models for same type/symbol/timeframe
         session.query(MLModelMeta).filter(
             MLModelMeta.model_type == model_type,
@@ -326,7 +323,3 @@ def _store_model_meta(
                 is_active=True,
             )
             session.add(meta)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise

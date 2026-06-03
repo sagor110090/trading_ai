@@ -170,11 +170,9 @@ def verify_pending_signals(symbol: str) -> int:
 
     Returns the number of signals newly verified.
     """
-    session_gen = get_session()
-    session = next(session_gen)
-    verified_count = 0
+    with get_session() as session:
+        verified_count = 0
 
-    try:
         # Get all unverified signals for this symbol
         pending_signals = (
             session.query(Signal)
@@ -242,13 +240,6 @@ def verify_pending_signals(symbol: str) -> int:
                     "Verified signal %s: %s profit=%.5f",
                     result.signal_id, result.result.value, result.profit_points or 0,
                 )
-
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
     logger.info("Verified %d/%d pending signals for %s", verified_count, len(pending_signals), symbol)
     return verified_count

@@ -4,8 +4,14 @@ REM Backtest BTC & XAU Pairs - 8 Weeks Each, Day Trading Mode
 REM Tests: BTCUSD, XAUUSD
 REM ============================================================
 
-REM Change to parent directory so Python imports work
-cd /d "%~dp0.."
+REM Change to script directory (project root)
+cd /d "%~dp0"
+
+REM Set PYTHONPATH so trading_ai package is importable
+set PYTHONPATH=C:\Users\mehed\Herd
+
+REM Fix Unicode encoding for Windows terminal
+set PYTHONIOENCODING=utf-8
 
 setlocal enabledelayedexpansion
 
@@ -36,22 +42,22 @@ REM ============================================================
 REM Pair 1: BTCUSD
 REM ============================================================
 echo.
-echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
+echo %CYAN%================================================================%RESET%
 echo %CYAN%  Pair 1/2: BTCUSD (Bitcoin/US Dollar)%RESET%
-echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
+echo %CYAN%================================================================%RESET%
 echo.
 python -m trading_ai.backtest_historical --weeks 8 --step 1 --mode day_trading --symbol BTCUSD --reset
 
 if !errorlevel! neq 0 (
     echo.
-    echo %RED%✗ BTCUSD backtest failed!%RESET%
+    echo %RED%X BTCUSD backtest failed!%RESET%
     echo.
     pause
     goto :next_pair
 )
 
 echo.
-echo %GREEN%✓ BTCUSD backtest complete!%RESET%
+echo %GREEN%V BTCUSD backtest complete!%RESET%
 echo.
 timeout /t 3 /nobreak >nul
 
@@ -60,22 +66,22 @@ REM ============================================================
 REM Pair 2: XAUUSD
 REM ============================================================
 echo.
-echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
+echo %CYAN%================================================================%RESET%
 echo %CYAN%  Pair 2/2: XAUUSD (Gold/US Dollar)%RESET%
-echo %CYAN%━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%RESET%
+echo %CYAN%================================================================%RESET%
 echo.
 python -m trading_ai.backtest_historical --weeks 8 --step 1 --mode day_trading --symbol XAUUSD --reset
 
 if !errorlevel! neq 0 (
     echo.
-    echo %RED%✗ XAUUSD backtest failed!%RESET%
+    echo %RED%X XAUUSD backtest failed!%RESET%
     echo.
     pause
     goto :finished
 )
 
 echo.
-echo %GREEN%✓ XAUUSD backtest complete!%RESET%
+echo %GREEN%V XAUUSD backtest complete!%RESET%
 echo.
 
 :finished

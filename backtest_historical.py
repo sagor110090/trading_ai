@@ -51,75 +51,66 @@ logging.getLogger(__name__).setLevel(logging.INFO)
 
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     """Store fetched candles into the database. Returns count of new candles."""
-    session_gen = get_session()
-    session = next(session_gen)
     count = 0
 
-    for _, row in df.iterrows():
-        ts = row["timestamp"]
-        if isinstance(ts, str):
-            ts = pd.Timestamp(ts, tz="UTC")
+    with get_session() as session:
+        for _, row in df.iterrows():
+            ts = row["timestamp"]
+            if isinstance(ts, str):
+                ts = pd.Timestamp(ts, tz="UTC")
 
-        exists = (
-            session.query(Candle)
-            .filter(
-                Candle.symbol == symbol,
-                Candle.timeframe == timeframe,
-                Candle.timestamp == ts,
+            exists = (
+                session.query(Candle)
+                .filter(
+                    Candle.symbol == symbol,
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp == ts,
+                )
+                .first()
             )
-            .first()
-        )
-        if exists:
-            continue
+            if exists:
+                continue
 
-        candle = Candle(
-            symbol=symbol,
-            timeframe=timeframe,
-            timestamp=ts,
-            open_price=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=float(row.get("volume", 0) or 0),
-            spread=float(row.get("spread", 0) or 0),
-        )
-        session.add(candle)
-        count += 1
-
-    try:
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
+            candle = Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                timestamp=ts,
+                open_price=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0) or 0),
+                spread=float(row.get("spread", 0) or 0),
+            )
+            session.add(candle)
+            count += 1
 
     return count
 
 
 def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 5000) -> pd.DataFrame:
     """Load candles from the database into a DataFrame."""
-    session_gen = get_session()
-    session = next(session_gen)
+    with get_session() as session:
+        candles = (
+            session.query(Candle)
+            .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+            .order_by(Candle.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
 
-    candles = (
-        session.query(Candle)
-        .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
-        .order_by(Candle.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
+        if not candles:
+            return pd.DataFrame()
 
-    if not candles:
-        return pd.DataFrame()
-
-    rows = [{
-        "timestamp": c.timestamp,
-        "open": c.open_price,
-        "high": c.high,
-        "low": c.low,
-        "close": c.close,
-        "volume": c.volume,
-        "spread": c.spread,
-    } for c in reversed(candles)]
+        rows = [{
+            "timestamp": c.timestamp,
+            "open": c.open_price,
+            "high": c.high,
+            "low": c.low,
+            "close": c.close,
+            "volume": c.volume,
+            "spread": c.spread,
+        } for c in reversed(candles)]
 
     return pd.DataFrame(rows)
 
@@ -299,9 +290,6 @@ def backfill_signals(
     Returns:
         Stats dict with counts.
     """
-    session_gen = get_session()
-    session = next(session_gen)
-
     # ── 1. Fetch historical candles ────────────────────────────────────
     console.print(f"\n[bold cyan]📥 Fetching {weeks} weeks of data for {symbol.value}...[/]")
 
@@ -411,149 +399,162 @@ def backfill_signals(
             "Replaying...", total=end_idx - start_idx, info="starting"
         )
 
-        for i in range(start_idx, end_idx, step):
-            # Get the M5 timestamp at this point
-            m5_ts = pd.Timestamp(m5_timestamps[i])
+        with get_session() as session:
+            for i in range(start_idx, end_idx, step):
+                # Get the M5 timestamp at this point
+                m5_ts = pd.Timestamp(m5_timestamps[i])
 
-            # Slice data up to this point (NO future data!)
-            df_m5_slice = df_m5.iloc[:i + 1].copy()
-            df_h1_slice = df_h1[df_h1["timestamp"] <= m5_ts].copy()
-            df_h4_slice = df_h4[df_h4["timestamp"] <= m5_ts].copy()
+                # Slice data up to this point (NO future data!)
+                df_m5_slice = df_m5.iloc[:i + 1].copy()
+                df_h1_slice = df_h1[df_h1["timestamp"] <= m5_ts].copy()
+                df_h4_slice = df_h4[df_h4["timestamp"] <= m5_ts].copy()
 
-            # Need enough H1/H4 data for the engine
-            if len(df_h1_slice) < 200:
-                progress.update(task, advance=step, info="H1 warming up")
-                continue
-            if mode != TradeMode.SCALPING and len(df_h4_slice) < 5:
-                progress.update(task, advance=step, info="H4 warming up")
-                continue
+                # Need enough H1/H4 data for the engine
+                if len(df_h1_slice) < 200:
+                    progress.update(task, advance=step, info="H1 warming up")
+                    continue
+                if mode != TradeMode.SCALPING and len(df_h4_slice) < 5:
+                    progress.update(task, advance=step, info="H4 warming up")
+                    continue
 
-            stats["checked"] += 1
+                stats["checked"] += 1
 
-            # ── Generate signal at this historical point ──
-            try:
-                trade_signal = generate_signal(
-                    df_h4_slice, df_h1_slice, df_m5_slice, symbol, mode, prefix="backtest_"
+                # ── Generate signal at this historical point ──
+                try:
+                    trade_signal = generate_signal(
+                        df_h4_slice, df_h1_slice, df_m5_slice, symbol, mode, prefix="backtest_"
+                    )
+                except Exception as e:
+                    logger.debug("Signal error at %s: %s", m5_ts, e)
+                    progress.update(task, advance=step, info="error")
+                    continue
+
+                if not trade_signal or trade_signal.signal.value == "NO_TRADE":
+                    stats["no_trade"] += 1
+                    progress.update(task, advance=step, info="no trade")
+                    continue
+
+                stats["signals"] += 1
+
+                # ── Duplicate check ──
+                dup_cutoff = m5_ts - pd.Timedelta(minutes=dup_window)
+                recent_dup = session.query(Signal).filter(
+                    Signal.symbol == symbol.value,
+                    Signal.signal == trade_signal.signal.value,
+                    Signal.entry >= trade_signal.entry * 0.9995,
+                    Signal.entry <= trade_signal.entry * 1.0005,
+                    Signal.timestamp >= dup_cutoff,
+                ).first()
+
+                if recent_dup:
+                    stats["skipped_duplicate"] += 1
+                    progress.update(task, advance=step, info="duplicate")
+                    continue
+
+                # ── Store signal ──
+                features = trade_signal.features.to_dict()
+                db_signal = Signal(
+                    signal_id=trade_signal.signal_id,
+                    symbol=trade_signal.symbol,
+                    timeframe=trade_signal.timeframe,
+                    signal=trade_signal.signal,
+                    confidence=trade_signal.confidence,
+                    entry=trade_signal.entry,
+                    stop_loss=trade_signal.stop_loss,
+                    take_profit=trade_signal.take_profit,
+                    timestamp=trade_signal.timestamp,
+                    ema20=features.get("ema20"),
+                    ema50=features.get("ema50"),
+                    ema200=features.get("ema200"),
+                    rsi14=features.get("rsi14"),
+                    macd_line=features.get("macd_line"),
+                    macd_signal=features.get("macd_signal"),
+                    macd_histogram=features.get("macd_histogram"),
+                    atr14=features.get("atr14"),
+                    candle_body_pct=features.get("candle_body_pct"),
+                    upper_wick_pct=features.get("upper_wick_pct"),
+                    lower_wick_pct=features.get("lower_wick_pct"),
+                    dist_ema20=features.get("dist_ema20"),
+                    dist_ema50=features.get("dist_ema50"),
+                    dist_ema200=features.get("dist_ema200"),
+                    trend_strength=features.get("trend_strength"),
+                    momentum_score=features.get("momentum_score"),
+                    session=features.get("session"),
+                    spread=features.get("spread"),
                 )
-            except Exception as e:
-                logger.debug("Signal error at %s: %s", m5_ts, e)
-                progress.update(task, advance=step, info="error")
-                continue
-
-            if not trade_signal or trade_signal.signal.value == "NO_TRADE":
-                stats["no_trade"] += 1
-                progress.update(task, advance=step, info="no trade")
-                continue
-
-            stats["signals"] += 1
-
-            # ── Duplicate check ──
-            # Use M5 checkpoint timestamp (m5_ts) instead of signal.timestamp,
-            # because signal.timestamp comes from H1 candle and is the same
-            # for all M5 checkpoints within the same hour.
-            dup_cutoff = m5_ts - pd.Timedelta(minutes=dup_window)
-            recent_dup = session.query(Signal).filter(
-                Signal.symbol == symbol.value,
-                Signal.signal == trade_signal.signal.value,
-                # Match on entry price ± small tolerance to catch true dupes
-                Signal.entry >= trade_signal.entry * 0.9995,
-                Signal.entry <= trade_signal.entry * 1.0005,
-                Signal.timestamp >= dup_cutoff,
-            ).first()
-
-            if recent_dup:
-                stats["skipped_duplicate"] += 1
-                progress.update(task, advance=step, info="duplicate")
-                continue
-
-            # ── Store signal ──
-            features = trade_signal.features.to_dict()
-            db_signal = Signal(
-                signal_id=trade_signal.signal_id,
-                symbol=trade_signal.symbol,
-                timeframe=trade_signal.timeframe,
-                signal=trade_signal.signal,
-                confidence=trade_signal.confidence,
-                entry=trade_signal.entry,
-                stop_loss=trade_signal.stop_loss,
-                take_profit=trade_signal.take_profit,
-                timestamp=trade_signal.timestamp,
-                ema20=features.get("ema20"),
-                ema50=features.get("ema50"),
-                ema200=features.get("ema200"),
-                rsi14=features.get("rsi14"),
-                macd_line=features.get("macd_line"),
-                macd_signal=features.get("macd_signal"),
-                macd_histogram=features.get("macd_histogram"),
-                atr14=features.get("atr14"),
-                candle_body_pct=features.get("candle_body_pct"),
-                upper_wick_pct=features.get("upper_wick_pct"),
-                lower_wick_pct=features.get("lower_wick_pct"),
-                dist_ema20=features.get("dist_ema20"),
-                dist_ema50=features.get("dist_ema50"),
-                dist_ema200=features.get("dist_ema200"),
-                trend_strength=features.get("trend_strength"),
-                momentum_score=features.get("momentum_score"),
-                session=features.get("session"),
-                spread=features.get("spread"),
-            )
-            session.add(db_signal)
-            session.flush()  # Get the auto-incremented ID
-            stats["stored"] += 1
-
-            # ── Verify signal using future M5 candles ──
-            # All candles from position i+1 onward are "future" (after current M5)
-            future_start = i + 1
-            future_count = total_m5 - future_start
-
-            if future_count < min_lookahead:
-                stats["skipped_short_data"] += 1
-                progress.update(task, advance=step, info="short data")
-                continue
-
-            # Build candle proxies (duck-typed for verify_signal)
-            check_count = min(future_count, lookahead)
-            future_candles = [
-                _CandleProxy(
-                    high=float(m5_highs[j]),
-                    low=float(m5_lows[j]),
-                    close=float(m5_closes[j]),
+                session.add(db_signal)
+                session.flush()  # Get the auto-incremented ID
+                stats["stored"] += 1
+                logger.info(
+                    "Stored signal %s: %s %s conf=%.1f entry=%.2f (id=%s)",
+                    trade_signal.signal_id, trade_signal.symbol, trade_signal.signal,
+                    trade_signal.confidence, trade_signal.entry, db_signal.id,
                 )
-                for j in range(future_start, future_start + check_count)
-            ]
 
-            result = verify_signal(db_signal, future_candles)
+                # ── Verify signal using future M5 candles ──
+                future_start = i + 1
+                future_count = total_m5 - future_start
 
-            if result:
-                verification = SignalVerification(
-                    signal_id=db_signal.id,
-                    result=result.result,
-                    profit_points=result.profit_points,
-                    risk_reward=result.risk_reward,
-                    holding_candles=result.holding_candles,
-                    max_favorable_excursion=result.max_favorable_excursion,
-                    max_adverse_excursion=result.max_adverse_excursion,
+                if future_count < min_lookahead:
+                    stats["skipped_short_data"] += 1
+                    progress.update(task, advance=step, info="short data")
+                    continue
+
+                # Build candle proxies (duck-typed for verify_signal)
+                check_count = min(future_count, lookahead)
+                future_candles = [
+                    _CandleProxy(
+                        high=float(m5_highs[j]),
+                        low=float(m5_lows[j]),
+                        close=float(m5_closes[j]),
+                    )
+                    for j in range(future_start, future_start + check_count)
+                ]
+
+                result = verify_signal(db_signal, future_candles)
+
+                if result:
+                    verification = SignalVerification(
+                        signal_id=db_signal.id,
+                        result=result.result,
+                        profit_points=result.profit_points,
+                        risk_reward=result.risk_reward,
+                        holding_candles=result.holding_candles,
+                        max_favorable_excursion=result.max_favorable_excursion,
+                        max_adverse_excursion=result.max_adverse_excursion,
+                    )
+                    session.add(verification)
+                    stats["verified"] += 1
+
+                    if result.result.value == "WIN":
+                        stats["wins"] += 1
+                    elif result.result.value == "LOSS":
+                        stats["losses"] += 1
+                    else:
+                        stats["breakevens"] += 1
+
+                # Commit every signal to persist immediately
+                session.commit()
+
+                direction = trade_signal.signal.value
+                emoji = "📈" if direction == "BUY" else "📉"
+                progress.update(
+                    task, advance=step,
+                    info=f"{emoji} {direction} conf={trade_signal.confidence:.0f}%  "
+                         f"W{stats['wins']} L{stats['losses']} BE{stats['breakevens']}"
                 )
-                session.add(verification)
-                stats["verified"] += 1
 
-                if result.result.value == "WIN":
-                    stats["wins"] += 1
-                elif result.result.value == "LOSS":
-                    stats["losses"] += 1
-                else:
-                    stats["breakevens"] += 1
+            # Session auto-commits when exiting 'with' block
 
-            direction = trade_signal.signal.value
-            emoji = "📈" if direction == "BUY" else "📉"
-            progress.update(
-                task, advance=step,
-                info=f"{emoji} {direction} conf={trade_signal.confidence:.0f}%  "
-                     f"W{stats['wins']} L{stats['losses']} BE{stats['breakevens']}"
-            )
-
-        # Commit all signals and verifications at once
-        session.commit()
+    # Verify signals were persisted
+    with get_session() as check_session:
+        db_count = check_session.query(Signal).filter(Signal.symbol == symbol.value).count()
+        ver_count = check_session.query(SignalVerification).join(Signal).filter(Signal.symbol == symbol.value).count()
+        logger.info(
+            "DB check after backfill: %d signals for %s, %d verifications",
+            db_count, symbol.value, ver_count,
+        )
+        console.print(f"  [dim]DB verify:[/] {db_count} signals, {ver_count} verifications for {symbol.value}")
 
     return stats
 
@@ -586,21 +587,19 @@ def run_backfill(
 
     # ── Optionally reset signals/verifications ──
     if reset:
-        session_gen = get_session()
-        session = next(session_gen)
-        for sym in symbols:
-            # Delete verifications for this symbol's signals
-            sig_ids = [s.id for s in session.query(Signal).filter(Signal.symbol == sym.value).all()]
-            if sig_ids:
-                session.query(SignalVerification).filter(
-                    SignalVerification.signal_id.in_(sig_ids)
-                ).delete(synchronize_session=False)
-                session.query(Signal).filter(Signal.symbol == sym.value).delete(synchronize_session=False)
-                console.print(f"  [yellow]Cleared signals & verifications for {sym.value}[/]")
-            # Also delete ML model meta for this symbol
-            from trading_ai.data.models import MLModelMeta
-            session.query(MLModelMeta).filter(MLModelMeta.symbol == sym.value).delete(synchronize_session=False)
-        session.commit()
+        with get_session() as session:
+            for sym in symbols:
+                # Delete verifications for this symbol's signals
+                sig_ids = [s.id for s in session.query(Signal).filter(Signal.symbol == sym.value).all()]
+                if sig_ids:
+                    session.query(SignalVerification).filter(
+                        SignalVerification.signal_id.in_(sig_ids)
+                    ).delete(synchronize_session=False)
+                    session.query(Signal).filter(Signal.symbol == sym.value).delete(synchronize_session=False)
+                    console.print(f"  [yellow]Cleared signals & verifications for {sym.value}[/]")
+                # Also delete ML model meta for this symbol
+                from trading_ai.data.models import MLModelMeta
+                session.query(MLModelMeta).filter(MLModelMeta.symbol == sym.value).delete(synchronize_session=False)
         console.print()
 
     total_stats = {

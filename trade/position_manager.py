@@ -116,24 +116,24 @@ class PositionManager:
         dedup_minutes = SIGNAL_DEDUP_WINDOWS.get(trade_mode, 60)
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=dedup_minutes)
 
-        session = next(get_session())
-        existing = (
-            session.query(Signal)
-            .filter(
-                Signal.symbol == symbol,
-                Signal.signal == direction,
-                Signal.created_at >= cutoff,
+        with get_session() as session:
+            existing = (
+                session.query(Signal)
+                .filter(
+                    Signal.symbol == symbol,
+                    Signal.signal == direction,
+                    Signal.created_at >= cutoff,
+                )
+                .first()
             )
-            .first()
-        )
 
-        if existing:
-            logger.info(
-                "Duplicate signal: %s %s already exists (id=%s, created %s)",
-                direction, symbol, existing.signal_id[:8], existing.created_at,
-            )
-            return True
-        return False
+            if existing:
+                logger.info(
+                    "Duplicate signal: %s %s already exists (id=%s, created %s)",
+                    direction, symbol, existing.signal_id[:8], existing.created_at,
+                )
+                return True
+            return False
 
     # ── Should we generate a signal at all? ────────────────────────────────
 

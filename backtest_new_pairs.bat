@@ -4,8 +4,14 @@ REM Backtest New Pairs - 2 Weeks Each
 REM Tests: ETHUSD, USDCAD, AUDUSD
 REM ============================================================
 
-REM Change to parent directory so Python imports work
-cd /d "%~dp0.."
+REM Change to script directory (project root)
+cd /d "%~dp0"
+
+REM Set PYTHONPATH so trading_ai package is importable
+set PYTHONPATH=C:\Users\mehed\Herd
+
+REM Fix Unicode encoding for Windows terminal
+set PYTHONIOENCODING=utf-8
 
 setlocal enabledelayedexpansion
 

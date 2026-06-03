@@ -515,36 +515,34 @@ class PositionMonitor:
 
     def _log_trade(self, stats: dict) -> None:
         """Log trade statistics to database."""
-        session = next(get_session())
+        with get_session() as session:
+            trade_log = TradeLog(
+                deal_id=str(stats.get("deal_id", "") or ""),
+                symbol=stats["symbol"],
+                direction=stats["direction"],
+                size=stats["size"],
+                entry_price=stats["entry"],
+                exit_price=stats.get("exit"),
+                stop_loss=stats["sl"],
+                take_profit=stats["tp"],
+                opened_at=datetime.fromisoformat(stats["opened_at"]),
+                closed_at=datetime.fromisoformat(stats["closed_at"]) if stats.get("closed_at") else None,
+                mfe_price=stats.get("mfe_price"),
+                mae_price=stats.get("mae_price"),
+                mfe_pnl=stats.get("mfe_pnl"),
+                mae_pnl=stats.get("mae_pnl"),
+                highest_tp_progress=stats.get("highest_tp_progress"),
+                strength_scores=str(stats.get("strength_scores", [])),
+                final_pnl=stats.get("pnl"),
+                close_reason=stats.get("reason", "unknown"),
+            )
 
-        trade_log = TradeLog(
-            deal_id=str(stats.get("deal_id", "") or ""),
-            symbol=stats["symbol"],
-            direction=stats["direction"],
-            size=stats["size"],
-            entry_price=stats["entry"],
-            exit_price=stats.get("exit"),
-            stop_loss=stats["sl"],
-            take_profit=stats["tp"],
-            opened_at=datetime.fromisoformat(stats["opened_at"]),
-            closed_at=datetime.fromisoformat(stats["closed_at"]) if stats.get("closed_at") else None,
-            mfe_price=stats.get("mfe_price"),
-            mae_price=stats.get("mae_price"),
-            mfe_pnl=stats.get("mfe_pnl"),
-            mae_pnl=stats.get("mae_pnl"),
-            highest_tp_progress=stats.get("highest_tp_progress"),
-            strength_scores=str(stats.get("strength_scores", [])),
-            final_pnl=stats.get("pnl"),
-            close_reason=stats.get("reason", "unknown"),
-        )
-
-        session.add(trade_log)
-        try:
-            session.commit()
-            logger.debug("Logged trade to database: %s", stats["symbol"])
-        except Exception as e:
-            session.rollback()
-            logger.error("Failed to log trade: %s", e)
+            session.add(trade_log)
+            try:
+                session.flush()
+                logger.debug("Logged trade to database: %s", stats["symbol"])
+            except Exception as e:
+                logger.error("Failed to log trade: %s", e)
 
     def add_manual_position(
         self,

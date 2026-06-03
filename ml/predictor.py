@@ -39,42 +39,42 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
 
     Returns (model, feature_columns, model_meta) or None.
     """
-    session_gen = __import__("trading_ai.data.database", fromlist=["get_session"]).get_session()
-    session = next(session_gen)
+    from trading_ai.data.database import get_session
     try:
-        # Prefer best AUC among active models for this symbol/timeframe
-        meta = (
-            session.query(MLModelMeta)
-            .filter(
-                MLModelMeta.symbol == symbol,
-                MLModelMeta.timeframe == timeframe,
-                MLModelMeta.is_active == True,
+        with get_session() as session:
+            # Prefer best AUC among active models for this symbol/timeframe
+            meta = (
+                session.query(MLModelMeta)
+                .filter(
+                    MLModelMeta.symbol == symbol,
+                    MLModelMeta.timeframe == timeframe,
+                    MLModelMeta.is_active == True,
+                )
+                .order_by(MLModelMeta.roc_auc.desc())
+                .first()
             )
-            .order_by(MLModelMeta.roc_auc.desc())
-            .first()
-        )
 
-        if not meta:
-            return None
+            if not meta:
+                return None
 
-        filepath = meta.filepath
-        # Resolve relative paths against MODEL_DIR
-        if not os.path.isabs(filepath):
-            filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
-        if not os.path.exists(filepath):
-            logger.warning("Model file not found: %s", filepath)
-            return None
+            filepath = meta.filepath
+            # Resolve relative paths against MODEL_DIR
+            if not os.path.isabs(filepath):
+                filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
+            if not os.path.exists(filepath):
+                logger.warning("Model file not found: %s", filepath)
+                return None
 
-        model = joblib.load(filepath)
+            model = joblib.load(filepath)
 
-        feat_path = filepath.replace(".joblib", "_features.json")
-        if os.path.exists(feat_path):
-            with open(feat_path) as f:
-                feature_cols = json.load(f)
-        else:
-            feature_cols = None
+            feat_path = filepath.replace(".joblib", "_features.json")
+            if os.path.exists(feat_path):
+                with open(feat_path) as f:
+                    feature_cols = json.load(f)
+            else:
+                feature_cols = None
 
-        return model, feature_cols, meta
+            return model, feature_cols, meta
 
     except Exception as e:
         logger.error("Failed to load model: %s", e)
