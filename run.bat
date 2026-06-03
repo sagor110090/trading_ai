@@ -1,4 +1,5 @@
 @echo off
+REM Always change to the trading_ai directory (where this batch file is located)
 cd /d "%~dp0"
 
 REM Fix Unicode encoding for Windows terminal
@@ -9,6 +10,15 @@ set PYTHON_PATH=C:\Users\mehed\AppData\Local\Programs\Python\Python313\python.ex
 
 REM Set PYTHONPATH to parent directory (so trading_ai package works)
 set PYTHONPATH=C:\Users\mehed\Herd
+
+REM Check if .env exists in current directory
+if not exist ".env" (
+    echo ERROR: .env file not found in current directory!
+    echo Make sure run.bat is in the trading_ai folder: C:\Users\mehed\Herd\trading_ai
+    echo.
+    pause
+    exit /b 1
+)
 
 REM Read interval from .env (default 300 = 5 min)
 for /f "tokens=2 delims==" %%A in ('findstr /R "^RUN_INTERVAL=" .env 2^>nul') do set INTERVAL=%%A
@@ -44,3 +54,8 @@ REM Use --loop so a single Python process stays alive.
 REM This lets the background position-monitor thread tick every %MONITOR_INTERVAL%s
 REM while the main signal cycle runs every %INTERVAL% seconds.
 "%PYTHON_PATH%" -m trading_ai.main --loop --interval %INTERVAL%
+
+REM If script exits, show error and pause
+echo.
+echo Trading AI has stopped. Press any key to close...
+pause >nul
