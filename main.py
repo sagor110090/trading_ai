@@ -465,7 +465,14 @@ def run_signal_cycle(
         # ── 3. Check if we should skip signal generation ─────────────────
         should_generate, skip_reason = position_manager.should_generate_signal(symbol.value)
         if not should_generate:
-            display_signal_skipped_cooldown(symbol.value, 0)  # reason already logged
+            # Extract remaining minutes from skip_reason (format: "Loss cooldown: X min remaining")
+            remaining_min = 0
+            if "min remaining" in skip_reason:
+                try:
+                    remaining_min = float(skip_reason.split(":")[1].split("min")[0].strip())
+                except (IndexError, ValueError):
+                    pass
+            display_signal_skipped_cooldown(symbol.value, remaining_min)
             # Still verify and auto-train (if enabled), but don't generate new signals
             if SETTINGS.ml.auto_train:
                 _try_auto_train(symbol.value, stats)
