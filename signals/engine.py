@@ -76,6 +76,37 @@ def _get_direction_from_df(df: pd.DataFrame) -> tuple[SignalType, FactorScores, 
     return direction, scores, features, row["close"]
 
 
+def _pips_to_price(pips: float, symbol: Symbol, entry: float) -> float:
+    """Convert pips to price value based on the symbol.
+
+    Different instruments have different pip values:
+    - Forex (non-JPY): 1 pip = 0.0001
+    - JPY pairs: 1 pip = 0.01
+    - Gold (XAUUSD), Silver (XAGUSD): 1 pip = 0.01
+    - Indices (US30, US500, NAS100): 1 pip = 0.1 or 1.0
+    - Crypto (BTCUSD, ETHUSD): varies by price
+    """
+    # JPY pairs
+    if symbol in [Symbol.USDJPY, Symbol.EURJPY, Symbol.GBPJPY]:
+        return pips * 0.01
+
+    # Metals (Gold, Silver)
+    if symbol in [Symbol.XAUUSD, Symbol.XAGUSD]:
+        return pips * 0.01
+
+    # Indices
+    if symbol in [Symbol.US30, Symbol.US500, Symbol.NAS100]:
+        return pips * 0.1
+
+    # Crypto - use percentage of current price
+    if symbol in [Symbol.BTCUSD, Symbol.ETHUSD, Symbol.LTCUSD,
+                  Symbol.BCHUSD, Symbol.XRPUSD, Symbol.BTCEUR, Symbol.ETHGBP]:
+        return pips * entry * 0.0001
+
+    # Default for forex majors (EURUSD, GBPUSD, etc.)
+    return pips * 0.0001
+
+
 def _compute_stop_take(
     signal: SignalType,
     entry: float,
@@ -84,7 +115,10 @@ def _compute_stop_take(
     sl_mult: float,
     tp_mult: float,
 ) -> tuple[float, float]:
-    """Calculate stop loss and take profit based on ATR multipliers."""
+    """Calculate stop loss and take profit based on ATR multipliers.
+
+    Automatically adds broker spread buffer to SL to account for execution latency.
+    """
     if atr is None or atr <= 0 or pd.isna(atr):
         if symbol == Symbol.XAUUSD:
             sl_distance = entry * 0.0015
@@ -96,6 +130,10 @@ def _compute_stop_take(
         sl_distance = atr * sl_mult
         tp_distance = atr * tp_mult
 
+    # Add broker spread buffer to SL (makes SL wider to avoid premature stop-outs)
+    broker_buffer = _pips_to_price(SETTINGS.broker_spread_pips, symbol, entry)
+    sl_distance += broker_buffer
+
     if signal == SignalType.BUY:
         stop_loss = entry - sl_distance
         take_profit = entry + tp_distance
@@ -105,6 +143,11 @@ def _compute_stop_take(
     else:
         stop_loss = entry
         take_profit = entry
+
+    logger.debug(
+        "SL/TP for %s: entry=%.5f SL=%.5f TP=%.5f (broker buffer=%.5f pips=%.2f)",
+        symbol.value, entry, stop_loss, take_profit, broker_buffer, SETTINGS.broker_spread_pips,
+    )
 
     return round(stop_loss, 5), round(take_profit, 5)
 

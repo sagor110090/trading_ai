@@ -276,6 +276,21 @@ def display_position_strength_exit(
     console.print(Panel(content, title="[bold red]Strength Exit[/]", border_style="red", padding=(0, 2)))
 
 
+def display_position_external_close(
+    symbol: str,
+    direction: str,
+    cooldown_minutes: int,
+) -> None:
+    """Show that a position was closed externally (SL/TP hit at broker)."""
+    dir_style = "[bold green]BUY[/]" if direction == "BUY" else "[bold red]SELL[/]"
+    content = (
+        f"  [yellow]🔔 EXTERNAL CLOSE[/]  {dir_style} [white]{symbol}[/]\n"
+        f"  [dim]Position closed by broker (SL or TP hit)[/]\n"
+        f"  [dim]Cooldown started[/]  {cooldown_minutes} minutes before re-entry"
+    )
+    console.print(Panel(content, title="[bold yellow]External Close[/]", border_style="yellow", padding=(0, 2)))
+
+
 def display_cycle_summary(stats: dict) -> None:
     """Print end-of-cycle summary panel."""
     lines = []

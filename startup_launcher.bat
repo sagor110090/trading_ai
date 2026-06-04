@@ -14,21 +14,15 @@ cd /d "%~dp0"
 REM ==========================================
 REM STEP 1: Launch MT5 Terminal
 REM ==========================================
-REM Update this path to your MT5 terminal.exe location
-REM Common locations:
-REM   C:\Program Files\MetaTrader 5\terminal.exe
-REM   C:\Program Files (x86)\MetaTrader 5\terminal.exe
-REM   C:\Users\<username>\AppData\Local\MetaTrader 5\terminal.exe
-
-set MT5_PATH=C:\Program Files\Fusion Markets MetaTrader 5\terminal64.exe
+set MT5_PATH=C:\Program Files\MetaTrader 5\terminal64.exe
 
 if exist "%MT5_PATH%" (
     echo Starting MT5 Terminal...
     start "" "%MT5_PATH%"
 
-    REM Wait for MT5 to fully load (adjust if needed)
-    echo Waiting for MT5 to initialize...
-    timeout /t 15 /nobreak >nul
+    REM Wait for MT5 to fully load AND login (60 seconds)
+    echo Waiting for MT5 to initialize and login...
+    timeout /t 60 /nobreak >nul
 ) else (
     echo MT5 not found at: %MT5_PATH%
     echo Please update MT5_PATH in this file.

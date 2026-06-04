@@ -35,6 +35,7 @@ from display import (
     display_missing_confluence_data,
     display_no_ml_model,
     display_no_signal,
+    display_position_external_close,
     display_position_reversed,
     display_signal,
     display_signal_skipped_cooldown,
@@ -319,6 +320,28 @@ def _check_position_strength(
                 )
                 # Register the close with position manager
                 position_manager.register_closed(decision.symbol, "strength_exit")
+            elif decision.action == "external_close":
+                has_close = True
+                table.add_row(
+                    decision.symbol[:10],
+                    decision.direction[:4],
+                    f"[yellow]SL/TP[/]",
+                    f"[yellow]{decision.pnl or 0:+.2f}[/]",
+                    "N/A",
+                    "[yellow]EXTERNAL[/]",
+                )
+                # Register cooldown with position manager (assume SL hit = loss for safety)
+                # This prevents immediate re-entry after broker closes position
+                position_manager.register_closed(decision.symbol, "loss")
+                logger.info(
+                    "External close detected: %s %s - registered 30min cooldown",
+                    decision.symbol, decision.direction,
+                )
+                display_position_external_close(
+                    decision.symbol,
+                    decision.direction,
+                    cooldown_minutes=30,  # day_trading mode
+                )
             elif decision.action == "trail_stop":
                 table.add_row(
                     decision.symbol[:10],
@@ -379,6 +402,12 @@ def _check_position_strength(
                         strength_score=decision.strength_score or 0,
                         pnl=decision.pnl or 0,
                         reason=decision.reason,
+                    )
+                elif decision.action == "external_close":
+                    display_position_external_close(
+                        symbol=decision.symbol,
+                        direction=decision.direction,
+                        cooldown_minutes=30,  # day_trading mode
                     )
 
 
