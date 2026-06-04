@@ -25,6 +25,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeEl
 from rich.table import Table
 
 from config.settings import SETTINGS, Symbol, Timeframe, TradeMode, TradingPlatform
+from config.utils import normalize_symbol
 from data.collector import CapitalComClient
 from data.database import get_session
 from data.models import Candle, Signal, SignalVerification, MLModelMeta

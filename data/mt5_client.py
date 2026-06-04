@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from config.settings import SETTINGS, Symbol, Timeframe
+from config.utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +163,11 @@ class MT5Client:
             raise ValueError(f"MT5 module missing timeframe constant {mt5_tf_name}")
 
         # Check if symbol exists in MT5 (try common broker suffixes if not found)
+        # Try "m" suffix first for brokers that use it as standard (e.g., BTCUSDm, XAGUSDm)
         attempted = [mt5_symbol]
         symbol_info = self._mt5.symbol_info(mt5_symbol)
         if not symbol_info:
-            for suffix in [".i", ".raw", ".pro", ".ecn", "m", ".micro", ".mini"]:
+            for suffix in ["m", ".i", ".raw", ".pro", ".ecn", ".micro", ".mini"]:
                 alt_symbol = f"{mt5_symbol}{suffix}"
                 info = self._mt5.symbol_info(alt_symbol)
                 if info:
@@ -262,8 +264,8 @@ class MT5Client:
         tick = self._mt5.symbol_info_tick(mt5_symbol)
 
         if tick is None:
-            # Try common broker suffixes
-            for suffix in [".i", ".raw", ".pro", ".ecn", "m", ".micro", ".mini"]:
+            # Try common broker suffixes (try "m" first for brokers using it as standard)
+            for suffix in ["m", ".i", ".raw", ".pro", ".ecn", ".micro", ".mini"]:
                 alt_symbol = f"{mt5_symbol}{suffix}"
                 alt_tick = self._mt5.symbol_info_tick(alt_symbol)
                 if alt_tick:
@@ -364,16 +366,28 @@ def place_order(
         logger.error("MT5 initialize failed - terminal must be running")
         return None
 
+    # Try to find the symbol (try "m" suffix first for brokers using it as standard)
+    broker_symbol = symbol
     symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        for suffix in ["m", ".i", ".raw", ".pro", ".ecn", ".micro", ".mini"]:
+            alt_symbol = f"{symbol}{suffix}"
+            info = mt5.symbol_info(alt_symbol)
+            if info:
+                logger.info("Symbol '%s' found as '%s' in MT5 for order", symbol, alt_symbol)
+                symbol_info = info
+                broker_symbol = alt_symbol
+                break
+
     if symbol_info is None:
         logger.error("Symbol %s not found", symbol)
         mt5.shutdown()
         return None
 
     # Get current price
-    tick = mt5.symbol_info_tick(symbol)
+    tick = mt5.symbol_info_tick(broker_symbol)
     if tick is None:
-        logger.error("Failed to get tick for %s", symbol)
+        logger.error("Failed to get tick for %s", broker_symbol)
         mt5.shutdown()
         return None
 
@@ -425,7 +439,7 @@ def place_order(
 
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
+        "symbol": broker_symbol,  # Use broker symbol (with "m" suffix if applicable)
         "volume": volume,
         "type": order_type_mt5,
         "price": price,
@@ -457,7 +471,7 @@ def place_order(
         return None
 
     logger.info("Order placed: %s %s @ %s, ticket=%d",
-                order_type, symbol, price, result.order)
+                order_type, broker_symbol, price, result.order)
     return result.order
 
 

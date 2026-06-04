@@ -48,10 +48,13 @@ logging.getLogger(__name__).setLevel(logging.INFO)
 
 # ── Candle storage / loading (same as main.py) ──────────────────────────
 
+from config.utils import normalize_symbol
+
 
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     """Store fetched candles into the database. Returns count of new candles."""
     count = 0
+    normalized_symbol = normalize_symbol(symbol)  # Strip 'm' suffix for DB consistency
 
     with get_session() as session:
         for _, row in df.iterrows():
@@ -62,7 +65,7 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
             exists = (
                 session.query(Candle)
                 .filter(
-                    Candle.symbol == symbol,
+                    Candle.symbol == normalized_symbol,
                     Candle.timeframe == timeframe,
                     Candle.timestamp == ts,
                 )
@@ -72,7 +75,7 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
                 continue
 
             candle = Candle(
-                symbol=symbol,
+                symbol=normalized_symbol,
                 timeframe=timeframe,
                 timestamp=ts,
                 open_price=float(row["open"]),
@@ -90,10 +93,11 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
 
 def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 5000) -> pd.DataFrame:
     """Load candles from the database into a DataFrame."""
+    normalized_symbol = normalize_symbol(symbol)  # Strip 'm' suffix for DB consistency
     with get_session() as session:
         candles = (
             session.query(Candle)
-            .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+            .filter(Candle.symbol == normalized_symbol, Candle.timeframe == timeframe)
             .order_by(Candle.timestamp.desc())
             .limit(limit)
             .all()
@@ -438,8 +442,9 @@ def backfill_signals(
 
                 # ── Duplicate check ──
                 dup_cutoff = m5_ts - pd.Timedelta(minutes=dup_window)
+                normalized_symbol = normalize_symbol(symbol.value)
                 recent_dup = session.query(Signal).filter(
-                    Signal.symbol == symbol.value,
+                    Signal.symbol == normalized_symbol,
                     Signal.signal == trade_signal.signal.value,
                     Signal.entry >= trade_signal.entry * 0.9995,
                     Signal.entry <= trade_signal.entry * 1.0005,
@@ -455,7 +460,7 @@ def backfill_signals(
                 features = trade_signal.features.to_dict()
                 db_signal = Signal(
                     signal_id=trade_signal.signal_id,
-                    symbol=trade_signal.symbol,
+                    symbol=normalized_symbol,  # Store normalized symbol
                     timeframe=trade_signal.timeframe,
                     signal=trade_signal.signal,
                     confidence=trade_signal.confidence,
@@ -547,14 +552,15 @@ def backfill_signals(
             # Session auto-commits when exiting 'with' block
 
     # Verify signals were persisted
+    normalized_symbol = normalize_symbol(symbol.value)
     with get_session() as check_session:
-        db_count = check_session.query(Signal).filter(Signal.symbol == symbol.value).count()
-        ver_count = check_session.query(SignalVerification).join(Signal).filter(Signal.symbol == symbol.value).count()
+        db_count = check_session.query(Signal).filter(Signal.symbol == normalized_symbol).count()
+        ver_count = check_session.query(SignalVerification).join(Signal).filter(Signal.symbol == normalized_symbol).count()
         logger.info(
             "DB check after backfill: %d signals for %s, %d verifications",
-            db_count, symbol.value, ver_count,
+            db_count, normalized_symbol, ver_count,
         )
-        console.print(f"  [dim]DB verify:[/] {db_count} signals, {ver_count} verifications for {symbol.value}")
+        console.print(f"  [dim]DB verify:[/] {db_count} signals, {ver_count} verifications for {normalized_symbol}")
 
     return stats
 
@@ -589,17 +595,18 @@ def run_backfill(
     if reset:
         with get_session() as session:
             for sym in symbols:
+                normalized_sym = normalize_symbol(sym.value)
                 # Delete verifications for this symbol's signals
-                sig_ids = [s.id for s in session.query(Signal).filter(Signal.symbol == sym.value).all()]
+                sig_ids = [s.id for s in session.query(Signal).filter(Signal.symbol == normalized_sym).all()]
                 if sig_ids:
                     session.query(SignalVerification).filter(
                         SignalVerification.signal_id.in_(sig_ids)
                     ).delete(synchronize_session=False)
-                    session.query(Signal).filter(Signal.symbol == sym.value).delete(synchronize_session=False)
-                    console.print(f"  [yellow]Cleared signals & verifications for {sym.value}[/]")
+                    session.query(Signal).filter(Signal.symbol == normalized_sym).delete(synchronize_session=False)
+                    console.print(f"  [yellow]Cleared signals & verifications for {normalized_sym}[/]")
                 # Also delete ML model meta for this symbol
                 from data.models import MLModelMeta
-                session.query(MLModelMeta).filter(MLModelMeta.symbol == sym.value).delete(synchronize_session=False)
+                session.query(MLModelMeta).filter(MLModelMeta.symbol == normalized_sym).delete(synchronize_session=False)
         console.print()
 
     total_stats = {

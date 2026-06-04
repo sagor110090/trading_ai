@@ -17,6 +17,7 @@ import pandas as pd
 from rich.logging import RichHandler
 
 from config.settings import SETTINGS, Symbol, Timeframe, TradingPlatform
+from config.utils import normalize_symbol
 from data.collector import CapitalComClient
 from data.database import create_tables, get_session
 from data.models import Candle, Signal, SignalVerification
@@ -105,6 +106,7 @@ def _setup_logging() -> None:
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     """Store fetched candles into the database. Returns count of new candles inserted."""
     count = 0
+    normalized_symbol = normalize_symbol(symbol)  # Normalize for DB consistency
 
     with get_session() as session:
         for _, row in df.iterrows():
@@ -115,7 +117,7 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
             exists = (
                 session.query(Candle)
                 .filter(
-                    Candle.symbol == symbol,
+                    Candle.symbol == normalized_symbol,
                     Candle.timeframe == timeframe,
                     Candle.timestamp == ts,
                 )
@@ -125,7 +127,7 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
                 continue
 
             candle = Candle(
-                symbol=symbol,
+                symbol=normalized_symbol,
                 timeframe=timeframe,
                 timestamp=ts,
                 open_price=float(row["open"]),
@@ -211,10 +213,11 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
 
 def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.DataFrame:
     """Load recent candles from the database into a DataFrame."""
+    normalized_symbol = normalize_symbol(symbol)  # Normalize for DB consistency
     with get_session() as session:
         candles = (
             session.query(Candle)
-            .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+            .filter(Candle.symbol == normalized_symbol, Candle.timeframe == timeframe)
             .order_by(Candle.timestamp.desc())
             .limit(limit)
             .all()

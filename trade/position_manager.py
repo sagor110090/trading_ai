@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
+from config.utils import broker_symbol
 from data.collector import CapitalComClient
 from data.database import get_session
 from data.models import Signal, SignalVerification
@@ -335,9 +336,14 @@ class PositionManager:
 
     @staticmethod
     def _get_epic(symbol: str) -> Optional[str]:
-        """Get the broker symbol identifier for the active platform."""
+        """Get the broker symbol identifier for the active platform.
+
+        For MT5, adds 'm' suffix for broker communication.
+        For Capital.com, maps to the epic identifier.
+        """
         if SETTINGS.trading_platform == TradingPlatform.MT5:
-            return symbol
+            # MT5 broker uses 'm' suffix (e.g., BTCUSDm)
+            return broker_symbol(symbol)
         from data.collector import _EPIC_MAP
         try:
             symbol_enum = Symbol(symbol)

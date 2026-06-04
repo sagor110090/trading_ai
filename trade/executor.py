@@ -9,6 +9,7 @@ from typing import Optional, Union
 import requests
 
 from config.settings import SETTINGS, SignalType, Symbol, TradeMode, TradingPlatform
+from config.utils import normalize_symbol
 from data.collector import CapitalComClient, _EPIC_MAP
 from signals.engine import TradeSignal
 
@@ -479,10 +480,20 @@ def mt5_get_open_positions(client) -> list[OpenPosition]:
 
 
 def mt5_has_open_position(client, symbol: str) -> Optional[OpenPosition]:
-    """Check if there's an open position for a symbol in MT5."""
+    """Check if there's an open position for a symbol in MT5.
+
+    Handles broker symbol suffixes (e.g., AUDUSDm) by comparing both
+    the base symbol and the 'm' suffix variant.
+    """
     positions = mt5_get_open_positions(client)
+    normalized_symbol = normalize_symbol(symbol)
     for pos in positions:
+        # Direct match
         if pos.epic == symbol:
+            return pos
+        # Handle "m" suffix: AUDUSD matches AUDUSDm and vice versa
+        normalized_epic = normalize_symbol(pos.epic)
+        if normalized_epic == normalized_symbol:
             return pos
     return None
 

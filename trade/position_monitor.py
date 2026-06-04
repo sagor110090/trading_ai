@@ -20,6 +20,7 @@ from typing import Optional
 import pandas as pd
 
 from config.settings import SETTINGS
+from config.utils import normalize_symbol
 from data.database import get_session
 from data.models import TradeLog
 from trade.executor import (
@@ -84,9 +85,10 @@ class PositionMonitor:
             if key in tracked_keys:
                 continue
 
-            # Add new position to tracker
+            # Add new position to tracker (normalize symbol for DB consistency)
+            normalized_symbol = normalize_symbol(pos.epic)
             self.tp_tracker.add_position(
-                symbol=pos.epic,
+                symbol=normalized_symbol,
                 direction=pos.direction,
                 entry_price=pos.level,
                 stop_loss=pos.stop_level if pos.stop_level else pos.level,
@@ -112,7 +114,7 @@ class PositionMonitor:
                 deal_id=key,
             )
             if final_stats:
-                self._log_trade(final_stats)
+                self._log_trade(final_stats, normalize_symbol(tracker.symbol))
             logger.info(
                 "Stopped tracking (external close): key=%s %s %s",
                 key, tracker.direction, tracker.symbol,
@@ -212,9 +214,12 @@ class PositionMonitor:
         # Use broker deal_id/ticket as the unique tracker key
         deal_id = str(pos.deal_id)
 
+        # Normalize symbol for tracker (tracker uses normalized symbols)
+        normalized_symbol = normalize_symbol(pos.epic)
+
         # Update TP tracker
         update_result = self.tp_tracker.update_position(
-            pos.epic, pos.direction, current_price,
+            normalized_symbol, pos.direction, current_price,
             deal_id=deal_id,
         )
 
@@ -224,11 +229,11 @@ class PositionMonitor:
 
         # Check if we should evaluate strength
         should_eval, eval_reason = self.tp_tracker.should_evaluate_strength(
-            pos.epic, pos.direction, current_price,
+            normalized_symbol, pos.direction, current_price,
             deal_id=deal_id,
         )
 
-        tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
+        tracked = self.tp_tracker.get_position(normalized_symbol, pos.direction, deal_id=deal_id)
         force_eval = (
             tp_progress >= 0.40 and tracked is not None
             and len(tracked.strength_scores) == 0
@@ -260,7 +265,7 @@ class PositionMonitor:
                     else {}
                 )
                 self.tp_tracker.record_strength_score(
-                    pos.epic, pos.direction,
+                    normalized_symbol, pos.direction,
                     score=strength_result.score,
                     decision=strength_result.decision,
                     reason=strength_result.reason,
@@ -430,8 +435,9 @@ class PositionMonitor:
         Returns:
             StrengthScoreResult
         """
-        # Get M5 dataframe for strength calculation
-        df = df_provider(pos.epic, "5m")
+        # Normalize symbol for database queries (df_provider queries DB)
+        normalized_symbol = normalize_symbol(pos.epic)
+        df = df_provider(normalized_symbol, "5m")
 
         if df is None or df.empty:
             logger.warning("No data available for strength evaluation of %s", pos.epic)
@@ -503,28 +509,37 @@ class PositionMonitor:
             )
             return
 
-        # Get final stats from tracker
+        # Get final stats from tracker (use normalized symbol)
+        normalized_symbol = normalize_symbol(pos.epic)
         final_stats = self.tp_tracker.close_position(
-            pos.epic, pos.direction,
+            normalized_symbol, pos.direction,
             exit_price=close_result.close_level or pos.level,
             reason=f"strength_exit:{decision.reason[:50]}",
             deal_id=str(pos.deal_id),
         )
 
         if final_stats:
-            self._log_trade(final_stats)
+            self._log_trade(final_stats, normalized_symbol)
 
         logger.info(
             "Position closed and verified: %s %s (deal_id=%s)",
             pos.direction, pos.epic, pos.deal_id,
         )
 
-    def _log_trade(self, stats: dict) -> None:
-        """Log trade statistics to database."""
+    def _log_trade(self, stats: dict, normalized_symbol: str = None) -> None:
+        """Log trade statistics to database.
+
+        Args:
+            stats: Trade statistics dictionary
+            normalized_symbol: Pre-normalized symbol (optional, for efficiency)
+        """
+        # Use provided normalized symbol or normalize from stats
+        symbol_to_store = normalized_symbol or normalize_symbol(stats["symbol"])
+
         with get_session() as session:
             trade_log = TradeLog(
                 deal_id=str(stats.get("deal_id", "") or ""),
-                symbol=stats["symbol"],
+                symbol=symbol_to_store,
                 direction=stats["direction"],
                 size=stats["size"],
                 entry_price=stats["entry"],
@@ -546,7 +561,7 @@ class PositionMonitor:
             session.add(trade_log)
             try:
                 session.flush()
-                logger.debug("Logged trade to database: %s", stats["symbol"])
+                logger.debug("Logged trade to database: %s", symbol_to_store)
             except Exception as e:
                 logger.error("Failed to log trade: %s", e)
 
@@ -561,8 +576,10 @@ class PositionMonitor:
         signal_id: str = None,
     ) -> None:
         """Add a position to tracking (e.g., right after placing a trade)."""
+        # Normalize symbol for database consistency
+        normalized_symbol = normalize_symbol(symbol)
         tracker = self.tp_tracker.add_position(
-            symbol=symbol,
+            symbol=normalized_symbol,
             direction=direction,
             entry_price=entry_price,
             stop_loss=stop_loss,
@@ -572,7 +589,7 @@ class PositionMonitor:
 
         logger.info(
             "Manually added to tracking: %s %s (signal: %s)",
-            direction, symbol, signal_id or "N/A",
+            direction, normalized_symbol, signal_id or "N/A",
         )
 
     def get_position_stats(self, symbol: str, direction: str) -> Optional[dict]:
