@@ -48,6 +48,12 @@ COOLDOWN_AFTER_LOSS: dict[str, int] = {
     "swing": 60,
 }
 
+COOLDOWN_AFTER_BREAKEVEN: dict[str, int] = {
+    "scalping": 8,
+    "day_trading": 15,
+    "swing": 30,
+}
+
 COOLDOWN_AFTER_WIN: dict[str, int] = {
     "scalping": 5,
     "day_trading": 10,
@@ -288,12 +294,14 @@ class PositionManager:
         """Register that a position was closed. Starts a cooldown.
 
         Args:
-            reason: "win", "loss", "timeout", "reversal"
+            reason: "win", "loss", "breakeven", "timeout", "reversal"
         """
         trade_mode = SETTINGS.trade_mode.value
 
         if reason == "loss":
             cooldown_minutes = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
+        elif reason == "breakeven":
+            cooldown_minutes = COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
         elif reason == "win":
             cooldown_minutes = COOLDOWN_AFTER_WIN.get(trade_mode, 10)
         elif reason == "timeout":

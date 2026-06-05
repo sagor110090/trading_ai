@@ -6,3 +6,5 @@ train modal cmd:-
 
  auto back with days:
    python auto_backtest.py --symbols XAGUSD BTCUSD
+
+   python auto_backtest.py  

@@ -9,6 +9,7 @@ class Symbol(str, Enum):
     # Crypto
     BTCUSD = "BTCUSD"
     ETHUSD = "ETHUSD"
+    SOLUSD = "SOLUSD"
     LTCUSD = "LTCUSD"
     BCHUSD = "BCHUSD"
     XRPUSD = "XRPUSD"

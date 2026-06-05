@@ -54,7 +54,7 @@ from trade.executor import (
     close_position_unified,
     place_trade_unified,
 )
-from trade.position_manager import PositionManager
+from trade.position_manager import PositionManager, COOLDOWN_AFTER_LOSS
 from trade.position_monitor import PositionMonitor
 from rich.panel import Panel
 from verification.verifier import verify_pending_signals
@@ -318,8 +318,19 @@ def _check_position_strength(
                     f"[red]{decision.strength_score or 0:.1f}[/]",
                     "[red]CLOSED[/]",
                 )
-                # Register the close with position manager
-                position_manager.register_closed(decision.symbol, "strength_exit")
+                # Register the close with position manager based on PnL
+                pnl = decision.pnl or 0
+                is_breakeven = abs(pnl) < 2.0
+                is_win = pnl > 2.0
+
+                if is_breakeven:
+                    close_reason = "breakeven"
+                elif is_win:
+                    close_reason = "win"
+                else:
+                    close_reason = "loss"
+
+                position_manager.register_closed(decision.symbol, close_reason)
             elif decision.action == "external_close":
                 has_close = True
                 table.add_row(
@@ -330,17 +341,17 @@ def _check_position_strength(
                     "N/A",
                     "[yellow]EXTERNAL[/]",
                 )
-                # Register cooldown with position manager (assume SL hit = loss for safety)
-                # This prevents immediate re-entry after broker closes position
+                # Get actual cooldown based on trade mode
+                actual_cooldown = COOLDOWN_AFTER_LOSS.get(SETTINGS.trade_mode.value, 30)
                 position_manager.register_closed(decision.symbol, "loss")
                 logger.info(
-                    "External close detected: %s %s - registered 30min cooldown",
-                    decision.symbol, decision.direction,
+                    "External close detected: %s %s - registered %dmin cooldown",
+                    decision.symbol, decision.direction, actual_cooldown,
                 )
                 display_position_external_close(
                     decision.symbol,
                     decision.direction,
-                    cooldown_minutes=30,  # day_trading mode
+                    cooldown_minutes=actual_cooldown,
                 )
             elif decision.action == "trail_stop":
                 table.add_row(
@@ -403,12 +414,7 @@ def _check_position_strength(
                         pnl=decision.pnl or 0,
                         reason=decision.reason,
                     )
-                elif decision.action == "external_close":
-                    display_position_external_close(
-                        symbol=decision.symbol,
-                        direction=decision.direction,
-                        cooldown_minutes=30,  # day_trading mode
-                    )
+                # external_close already displayed above with correct cooldown (30 min)
 
 
 def run_signal_cycle(
