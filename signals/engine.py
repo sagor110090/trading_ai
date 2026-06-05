@@ -18,6 +18,7 @@ from config.settings import (
 )
 from indicators.features import FeatureSet, compute_all_features, extract_feature_set
 from signals.scoring import FactorScores, compute_signal_scores
+from trade.weekly_close import check_weekly_close_status
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,18 @@ def generate_signal_scalping(
     """
     cfg = SETTINGS.scalping
 
+    # Check weekly close - block new trades if approaching weekly close
+    if SETTINGS.weekly_close.enabled:
+        close_status = check_weekly_close_status(
+            symbol=symbol.value,
+            close_day=SETTINGS.weekly_close.close_day,
+            close_time_utc=SETTINGS.weekly_close.close_time_utc,
+            stop_new_trades_hours=SETTINGS.weekly_close.stop_new_trades_hours,
+        )
+        if close_status.should_stop_new_trades:
+            logger.info("Scalping: %s - %s", symbol.value, close_status.message)
+            return None
+
     if df_h1.empty or len(df_h1) < 200:
         logger.info("Scalping: insufficient H1 data (%d)", len(df_h1))
         return None
@@ -276,6 +289,18 @@ def generate_signal_day_trading(
     - Threshold: 35%
     """
     cfg = SETTINGS.day_trading
+
+    # Check weekly close - block new trades if approaching weekly close
+    if SETTINGS.weekly_close.enabled:
+        close_status = check_weekly_close_status(
+            symbol=symbol.value,
+            close_day=SETTINGS.weekly_close.close_day,
+            close_time_utc=SETTINGS.weekly_close.close_time_utc,
+            stop_new_trades_hours=SETTINGS.weekly_close.stop_new_trades_hours,
+        )
+        if close_status.should_stop_new_trades:
+            logger.info("Day trade: %s - %s", symbol.value, close_status.message)
+            return None
 
     if df_h1.empty or len(df_h1) < 200:
         logger.info("Day trade: insufficient H1 data (%d)", len(df_h1))
@@ -375,6 +400,18 @@ def generate_signal_swing(
     - Threshold: 40%
     """
     cfg = SETTINGS.swing
+
+    # Check weekly close - block new trades if approaching weekly close
+    if SETTINGS.weekly_close.enabled:
+        close_status = check_weekly_close_status(
+            symbol=symbol.value,
+            close_day=SETTINGS.weekly_close.close_day,
+            close_time_utc=SETTINGS.weekly_close.close_time_utc,
+            stop_new_trades_hours=SETTINGS.weekly_close.stop_new_trades_hours,
+        )
+        if close_status.should_stop_new_trades:
+            logger.info("Swing: %s - %s", symbol.value, close_status.message)
+            return None
 
     if df_h4.empty or len(df_h4) < 200 or df_h1.empty or len(df_h1) < 200:
         logger.info("Swing: insufficient data (H4=%d, H1=%d)", len(df_h4), len(df_h1))

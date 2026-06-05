@@ -46,6 +46,7 @@ from display import (
     display_trade_skipped_cooldown,
     display_trade_skipped_existing,
     display_verification_summary,
+    display_weekly_close_positions_closed,
 )
 from indicators.features import compute_all_features
 from ml.predictor import Prediction, predict_signal
@@ -56,6 +57,7 @@ from trade.executor import (
 )
 from trade.position_manager import PositionManager, COOLDOWN_AFTER_LOSS
 from trade.position_monitor import PositionMonitor
+from trade.weekly_close import check_weekly_close_status
 from rich.panel import Panel
 from verification.verifier import verify_pending_signals
 
@@ -318,19 +320,9 @@ def _check_position_strength(
                     f"[red]{decision.strength_score or 0:.1f}[/]",
                     "[red]CLOSED[/]",
                 )
-                # Register the close with position manager based on PnL
-                pnl = decision.pnl or 0
-                is_breakeven = abs(pnl) < 2.0
-                is_win = pnl > 2.0
-
-                if is_breakeven:
-                    close_reason = "breakeven"
-                elif is_win:
-                    close_reason = "win"
-                else:
-                    close_reason = "loss"
-
-                position_manager.register_closed(decision.symbol, close_reason)
+                # Strength exit: use longer cooldown regardless of PnL
+                # These trades were struggling/weak, even if they made small profit
+                position_manager.register_closed(decision.symbol, "strength_exit")
             elif decision.action == "external_close":
                 has_close = True
                 table.add_row(
@@ -456,6 +448,7 @@ def run_signal_cycle(
             "auto_train_started": False,
             "timeout_closed": False,
             "strength_exit": False,
+            "weekly_close_closed": 0,
         }
 
         fetched: dict[str, pd.DataFrame] = {}
@@ -463,6 +456,24 @@ def run_signal_cycle(
         # ── 0. Check position timeouts ──────────────────────────────────
         if SETTINGS.auto_trade:
             _check_timeouts(client, stats, position_manager, symbol.value)
+
+        # ── 0.5. Check weekly close ────────────────────────────────────────
+        if SETTINGS.weekly_close.enabled:
+            close_status = check_weekly_close_status(
+                symbol=symbol.value,
+                close_day=SETTINGS.weekly_close.close_day,
+                close_time_utc=SETTINGS.weekly_close.close_time_utc,
+                close_positions_hours=SETTINGS.weekly_close.close_positions_hours,
+            )
+            # Close positions if we're in the weekly close window
+            if close_status.should_close_positions and SETTINGS.auto_trade:
+                closed = position_manager.close_all_for_weekly_close(symbol.value)
+                if closed:
+                    display_weekly_close_positions_closed(len(closed), symbol.value)
+                    stats["weekly_close_closed"] = len(closed)
+            # Log status if we're approaching weekly close
+            elif close_status.should_stop_new_trades:
+                logger.info("Weekly close approaching: %s - %s", symbol.value, close_status.message)
 
         # ── 1. Fetch and store candles ──────────────────────────────────
         candle_results: dict[str, int] = {}

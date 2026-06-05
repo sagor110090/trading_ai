@@ -245,6 +245,25 @@ class VerificationConfig:
 
 
 @dataclass(frozen=True)
+class WeeklyCloseConfig:
+    """Configuration for weekly market close handling.
+
+    Forex markets close at Friday 22:00 UTC (5 PM EST).
+    Time values are in decimal hours: 0.5 = 30 minutes, 2.0 = 2 hours.
+    """
+    # Weekly close time (UTC) - Friday 22:00 UTC = 5 PM EST
+    close_time_utc: str = "22:00"
+    # Day of week (5 = Friday, where Monday=0, Sunday=6)
+    close_day: int = 5
+    # Hours before close to stop new trades (2.0 hours = 3 PM EST)
+    stop_new_trades_hours: float = 2.0
+    # Hours before close to close existing positions (0.5 hours = 30 min = 4:30 PM EST)
+    close_positions_hours: float = 0.5
+    # Enable/disable weekly close handling
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class Settings:
     capital_com: CapitalComConfig = field(default_factory=CapitalComConfig)
     mt5: MT5Config = field(default_factory=MT5Config)
@@ -258,6 +277,7 @@ class Settings:
     ml: MLConfig = field(default_factory=MLConfig)
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
+    weekly_close: WeeklyCloseConfig = field(default_factory=WeeklyCloseConfig)
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
@@ -358,6 +378,11 @@ def load_settings() -> Settings:
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
     auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
 
+    # Weekly close settings
+    weekly_close_enabled = os.getenv("WEEKLY_CLOSE_ENABLED", "true").lower() == "true"
+    weekly_close_stop_new_trades = float(os.getenv("WEEKLY_CLOSE_STOP_NEW_TRADES_HOURS", "2.0"))
+    weekly_close_close_positions = float(os.getenv("WEEKLY_CLOSE_CLOSE_POSITIONS_HOURS", "0.5"))
+
     # Read all ML_PREDICTION_THRESHOLD_<SYMBOL> from env
     prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))}
     for key, value in os.environ.items():
@@ -374,6 +399,11 @@ def load_settings() -> Settings:
         trading_platform=trading_platform,
         database=db_cfg,
         ml=MLConfig(model_dir=model_dir, prediction_thresholds=prediction_thresholds, auto_train=auto_train),
+        weekly_close=WeeklyCloseConfig(
+            enabled=weekly_close_enabled,
+            stop_new_trades_hours=weekly_close_stop_new_trades,
+            close_positions_hours=weekly_close_close_positions,
+        ),
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         trade_sizes=trade_sizes,

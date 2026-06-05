@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
-from config.utils import broker_symbol
+from config.utils import broker_symbol, normalize_symbol
 from data.collector import CapitalComClient
 from data.database import get_session
 from data.models import Signal, SignalVerification
@@ -36,6 +36,7 @@ from trade.executor import (
     place_trade_unified,
     close_position_unified,
 )
+from trade.weekly_close import check_weekly_close_status
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,14 @@ COOLDOWN_AFTER_WIN: dict[str, int] = {
     "scalping": 5,
     "day_trading": 10,
     "swing": 15,
+}
+
+# Cooldown after strength exit (weak trend, position closed early)
+# Longer than normal win because the trade was struggling
+COOLDOWN_AFTER_STRENGTH_EXIT: dict[str, int] = {
+    "scalping": 15,   # Same as breakeven
+    "day_trading": 30,  # Same as loss cooldown
+    "swing": 45,   # Between win (15) and loss (60)
 }
 
 # ── Signal dedup window (minutes) ────────────────────────────────────────
@@ -294,7 +303,7 @@ class PositionManager:
         """Register that a position was closed. Starts a cooldown.
 
         Args:
-            reason: "win", "loss", "breakeven", "timeout", "reversal"
+            reason: "win", "loss", "breakeven", "timeout", "reversal", "strength_exit"
         """
         trade_mode = SETTINGS.trade_mode.value
 
@@ -308,6 +317,9 @@ class PositionManager:
             cooldown_minutes = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
         elif reason == "reversal":
             cooldown_minutes = 2
+        elif reason == "strength_exit":
+            # Longer cooldown for strength exit (trade was weak/struggling)
+            cooldown_minutes = COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
         else:
             cooldown_minutes = 5
 
@@ -339,6 +351,81 @@ class PositionManager:
         for cd in expired:
             logger.debug("Cooldown expired: %s after %s", cd.symbol, cd.reason)
         self.cooldowns = [cd for cd in self.cooldowns if cd.until > now]
+
+    # ── Weekly Close Handling ───────────────────────────────────────────────
+
+    def should_close_for_weekly_close(self, symbol: str) -> bool:
+        """Check if positions should be closed due to weekly close.
+
+        Args:
+            symbol: The symbol to check
+
+        Returns:
+            True if positions for this symbol should be closed
+        """
+        if not SETTINGS.weekly_close.enabled:
+            return False
+
+        close_status = check_weekly_close_status(
+            symbol=symbol,
+            close_day=SETTINGS.weekly_close.close_day,
+            close_time_utc=SETTINGS.weekly_close.close_time_utc,
+            close_positions_hours=SETTINGS.weekly_close.close_positions_hours,
+        )
+        return close_status.should_close_positions
+
+    def close_all_for_weekly_close(self, symbol: str) -> list:
+        """Close all positions for a symbol due to weekly close.
+
+        Args:
+            symbol: The symbol to close positions for
+
+        Returns:
+            List of close results for positions that were closed
+        """
+        if not SETTINGS.weekly_close.enabled:
+            logger.debug("Weekly close handling disabled, skipping position close")
+            return []
+
+        # Check if we should close
+        if not self.should_close_for_weekly_close(symbol):
+            logger.debug("Not in weekly close window for %s", symbol)
+            return []
+
+        logger.info("Weekly close: closing all positions for %s", symbol)
+
+        # Get all open positions
+        self.sync_positions()
+        epic = self._get_epic(symbol)
+
+        if not epic:
+            logger.warning("No epic found for symbol %s", symbol)
+            return []
+
+        closed_positions = []
+        for pos in self._broker_positions:
+            # Normalize both for comparison (handle 'm' suffix)
+            normalized_epic = normalize_symbol(pos.epic)
+            normalized_symbol = normalize_symbol(symbol)
+
+            if normalized_epic == normalized_symbol:
+                logger.info(
+                    "Closing position for weekly close: %s %s (deal %s)",
+                    pos.direction, pos.epic, pos.deal_id
+                )
+                close_result = close_position_unified(self.client, pos)
+                if close_result.success:
+                    closed_positions.append(close_result)
+                    # Register as closed for cooldown tracking
+                    self.register_closed(symbol, "weekly_close")
+                else:
+                    logger.error(
+                        "Failed to close position %s: %s",
+                        pos.deal_id, close_result.error
+                    )
+
+        logger.info("Weekly close: closed %d positions for %s", len(closed_positions), symbol)
+        return closed_positions
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

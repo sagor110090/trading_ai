@@ -291,6 +291,16 @@ def display_position_external_close(
     console.print(Panel(content, title="[bold yellow]External Close[/]", border_style="yellow", padding=(0, 2)))
 
 
+def display_weekly_close_positions_closed(count: int, symbol: str) -> None:
+    """Show that positions were closed due to weekly market close."""
+    content = (
+        f"  [yellow]🏁 WEEKLY CLOSE[/]  [white]{symbol}[/]\n"
+        f"  [dim]Closed {count} position{'s' if count != 1 else ''} before weekly market close[/]\n"
+        f"  [dim]Markets close Friday 22:00 UTC (5 PM EST)[/]"
+    )
+    console.print(Panel(content, title="[bold yellow]Weekly Close[/]", border_style="yellow", padding=(0, 2)))
+
+
 def display_cycle_summary(stats: dict) -> None:
     """Print end-of-cycle summary panel."""
     lines = []
@@ -344,6 +354,11 @@ def display_cycle_summary(stats: dict) -> None:
     # Strength exit
     if stats.get("strength_exit"):
         lines.append("🚪 [yellow]Position closed (weak trend)[/]")
+
+    # Weekly close
+    if stats.get("weekly_close_closed", 0) > 0:
+        count = stats["weekly_close_closed"]
+        lines.append(f"🏁 [yellow]{count} position{'s' if count != 1 else ''} closed (weekly close)[/]")
 
     content = "\n".join(lines)
     console.print()

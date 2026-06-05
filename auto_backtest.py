@@ -1,15 +1,15 @@
 """Automated backtest and ML training pipeline.
 
 This command automatically:
-1. Checks which symbols have new data available
-2. Fetches ALL new candle data (auto-detects how many days)
-3. Backtests to generate and verify signals on new data only
-4. Trains ML models if enough new verified signals (30+)
+1. Fetches candle data for specified days
+2. Backtests to generate and verify signals
+3. Trains ML models if enough verified signals (30+)
 
 Usage:
-    python -m trading_ai.auto_backtest              # Auto-detect and update all stale symbols
-    python -m trading_ai.auto_backtest --symbols XAGUSD BTCUSD
-    python -m trading_ai.auto_backtest --force       # Force update all symbols
+    python auto_backtest.py                          # Auto-detect and update all stale symbols
+    python auto_backtest.py --symbol XAUUSD --days 30    # Backtest XAUUSD for 30 days
+    python auto_backtest.py --symbol XAUUSD --days 30 --reset    # Delete existing signals first
+    python auto_backtest.py --symbols XAGUSD BTCUSD --force    # Force update specific symbols
 """
 
 import argparse
@@ -519,16 +519,17 @@ def run_auto_backtest(
     symbols: Optional[List[Symbol]] = None,
     force: bool = False,
     mode: TradeMode = None,
+    days: Optional[int] = None,
+    reset: bool = False,
 ) -> dict:
     """Run the full automated backtest and training pipeline.
-
-    Automatically detects how many days of new data exist for each symbol
-    and processes all of them.
 
     Args:
         symbols: List of symbols to process (None = all configured symbols)
         force: Force update all symbols regardless of staleness
         mode: Trade mode (None = from settings)
+        days: Number of days to backtest (None = auto-detect)
+        reset: Delete existing signals before backtesting
 
     Returns:
         dict with overall results
@@ -539,14 +540,50 @@ def run_auto_backtest(
     if mode is None:
         mode = SETTINGS.trade_mode
 
+    display_days = f"{days} days" if days else "auto-detect"
+    display_reset = "ON (will delete existing signals)" if reset else "OFF"
+
     console.print(Panel(
         f"[bold]Automated Backtest & ML Pipeline[/]\n"
         f"  [dim]Mode[/]  {mode.value}\n"
         f"  [dim]Symbols[/]  {', '.join(s.value for s in symbols)}\n"
-        f"  [dim]Auto-detect[/]  ON (fetches all available new data)\n"
+        f"  [dim]Days[/]  {display_days}\n"
+        f"  [dim]Reset[/]  {display_reset}\n"
         f"  [dim]Force[/]  {force}",
         border_style="cyan",
     ))
+
+    # ── Reset: Delete existing signals if requested ────────────────────────────────
+    if reset:
+        console.print("\n[bold yellow]🗑️  Reset mode: deleting existing signals...[/]")
+        with get_session() as session:
+            for symbol in symbols:
+                # Delete verifications first (foreign key constraint)
+                deleted_verifications = (
+                    session.query(SignalVerification)
+                    .join(Signal)
+                    .filter(Signal.symbol == symbol.value)
+                    .delete(synchronize_session=False)
+                )
+                # Delete signals
+                deleted_signals = (
+                    session.query(Signal)
+                    .filter(Signal.symbol == symbol.value)
+                    .delete(synchronize_session=False)
+                )
+                # Delete ML models
+                deleted_models = (
+                    session.query(MLModelMeta)
+                    .filter(MLModelMeta.symbol == symbol.value)
+                    .delete(synchronize_session=False)
+                )
+                session.commit()
+                console.print(
+                    f"  [yellow]Deleted[/] {deleted_signals} signals, "
+                    f"{deleted_verifications} verifications, "
+                    f"{deleted_models} ML models for {symbol.value}"
+                )
+        console.print("[green]✓ Reset complete[/]\n")
 
     # ── Phase 1: Analyze ────────────────────────────────────────────────────────
     statuses = analyze_all_symbols(symbols)
@@ -592,37 +629,59 @@ def run_auto_backtest(
         console.print(f"{'═' * 50}")
 
         try:
-            # 1. Fetch new candles
-            candle_results = fetch_new_candles_for_symbol(
-                client,
-                symbol,
-                status["last_signal_date"],
-                weeks=4,
-            )
+            # If days specified, use full backfill (like backtest_historical.py)
+            if days is not None:
+                weeks = max(1, days // 7)  # Convert days to weeks
+                console.print(f"\n[bold]🔄 Full backfill for {days} days ({weeks} weeks)[/]")
+                signal_results = backfill_signals(symbol, mode, weeks=weeks, step=12)
 
-            total_new_candles = sum(candle_results.values())
-            if total_new_candles == 0:
-                console.print("[dim]No new candles — skipping[/]")
-                results["skipped"].append(symbol.value)
-                continue
+                if "error" in signal_results:
+                    console.print(f"[yellow]⚠ Backfill error: {signal_results.get('error')}[/]")
+                    results["errors"].append((symbol.value, signal_results.get('error')))
+                    continue
 
-            # 2. Generate signals for new period
-            from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
-            signal_results = generate_new_signals(symbol, mode, from_date)
+                # Extract results from backfill
+                new_signals = signal_results.get("signals", 0)
+                new_verified = signal_results.get("verified", 0)
+                new_wins = signal_results.get("wins", 0)
+                new_losses = signal_results.get("losses", 0)
+                new_be = signal_results.get("breakevens", 0)
+                total_new_candles = "N/A"
 
-            if "error" in signal_results:
-                console.print(f"[yellow]⚠ Signal generation error: {signal_results['error']}[/]")
-                results["errors"].append((symbol.value, signal_results['error']))
-                continue
+            else:
+                # 1. Fetch new candles
+                candle_results = fetch_new_candles_for_symbol(
+                    client,
+                    symbol,
+                    status["last_signal_date"],
+                    weeks=4,
+                )
+
+                total_new_candles = sum(candle_results.values())
+                if total_new_candles == 0:
+                    console.print("[dim]No new candles — skipping[/]")
+                    results["skipped"].append(symbol.value)
+                    continue
+
+                # 2. Generate signals for new period
+                from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
+                signal_results = generate_new_signals(symbol, mode, from_date)
+
+                if "error" in signal_results:
+                    console.print(f"[yellow]⚠ Signal generation error: {signal_results['error']}[/]")
+                    results["errors"].append((symbol.value, signal_results['error']))
+                    continue
+
+                # Extract results
+                new_verified = signal_results["verified"]
+                new_wins = signal_results["wins"]
+                new_losses = signal_results["losses"]
+                new_be = signal_results["breakevens"]
+                new_signals = signal_results["signals"]
 
             # 3. Display signal results
-            new_verified = signal_results["verified"]
-            new_wins = signal_results["wins"]
-            new_losses = signal_results["losses"]
-            new_be = signal_results["breakevens"]
-
             console.print(
-                f"\n[dim]New signals[/]  {signal_results['signals']} generated, "
+                f"\n[dim]Signals[/]  {new_signals} generated, "
                 f"{new_verified} verified\n"
                 f"  [green]Wins[/]  {new_wins}  [red]Losses[/]  {new_losses}  "
                 f"[yellow]BE[/]  {new_be}"
@@ -634,7 +693,7 @@ def run_auto_backtest(
             results["processed"].append({
                 "symbol": symbol.value,
                 "new_candles": total_new_candles,
-                "new_signals": signal_results["signals"],
+                "new_signals": new_signals,
                 "new_verified": new_verified,
                 "new_wins": new_wins,
                 "new_losses": new_losses,
@@ -674,11 +733,23 @@ def run_auto_backtest(
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Automated backtest and ML training pipeline (auto-detects new data)"
+        description="Automated backtest and ML training pipeline"
+    )
+    parser.add_argument(
+        "--symbol", type=str, default=None,
+        help="Single symbol to backtest (e.g., XAUUSD)"
     )
     parser.add_argument(
         "--symbols", nargs="+", default=None,
-        help="Symbols to process (default: all configured symbols)"
+        help="Multiple symbols to process (default: all configured symbols)"
+    )
+    parser.add_argument(
+        "--days", type=int, default=None,
+        help="Number of days to backtest (e.g., 30). If not specified, auto-detects new data only"
+    )
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Delete existing signals for the symbol(s) before backtesting"
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -693,9 +764,22 @@ def main() -> None:
     args = parser.parse_args()
 
     mode = TradeMode(args.mode) if args.mode else None
-    symbols = [Symbol(s) for s in args.symbols] if args.symbols else None
 
-    run_auto_backtest(symbols=symbols, force=args.force, mode=mode)
+    # Handle --symbol (single) vs --symbols (multiple)
+    if args.symbol:
+        symbols = [Symbol(args.symbol)]
+    elif args.symbols:
+        symbols = [Symbol(s) for s in args.symbols]
+    else:
+        symbols = None
+
+    run_auto_backtest(
+        symbols=symbols,
+        force=args.force,
+        mode=mode,
+        days=args.days,
+        reset=args.reset,
+    )
 
 
 if __name__ == "__main__":
