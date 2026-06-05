@@ -27,6 +27,7 @@ _SYMBOL_MAP: dict[Symbol, str] = {
     Symbol.XAUUSD: "XAUUSD",
     Symbol.BTCUSD: "BTCUSD",
     Symbol.ETHUSD: "ETHUSD",
+    Symbol.SOLUSD: "SOLUSD",
     Symbol.EURUSD: "EURUSD",
     Symbol.GBPUSD: "GBPUSD",
     # Additional forex pairs
