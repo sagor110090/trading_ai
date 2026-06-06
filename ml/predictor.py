@@ -9,10 +9,8 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
 
 from config.settings import SETTINGS
-from data.database import get_engine
 from data.models import MLModelMeta
 from indicators.features import FeatureSet
 from signals.engine import TradeSignal

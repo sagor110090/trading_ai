@@ -10,7 +10,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
 from config.settings import (

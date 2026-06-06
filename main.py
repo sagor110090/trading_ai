@@ -11,7 +11,6 @@ Key behaviors:
 import logging
 import sys
 import threading
-from typing import Optional
 
 import pandas as pd
 from rich.logging import RichHandler
@@ -39,7 +38,6 @@ from display import (
     display_position_reversed,
     display_signal,
     display_signal_skipped_cooldown,
-    display_timeout_closed,
     display_trade_blocked,
     display_trade_failed,
     display_trade_placed,

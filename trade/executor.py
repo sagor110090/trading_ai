@@ -1,7 +1,6 @@
 """Trade executor: places orders on Capital.com or MT5 when auto-trade is enabled."""
 
 import logging
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Union
