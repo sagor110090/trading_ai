@@ -1,6 +1,7 @@
 """Trade executor: places orders on Capital.com or MT5 when auto-trade is enabled."""
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Union
@@ -675,19 +676,72 @@ def mt5_update_position_sl_tp(
 
 def mt5_check_timeouts(client) -> list[CloseResult]:
     """Check all open MT5 positions and close any that have exceeded max hold time."""
-    max_hold_minutes = SETTINGS.get_max_hold_minutes()
-    positions = client.get_positions()
+    import MetaTrader5 as mt5
 
-    if not positions:
+    max_hold_minutes = SETTINGS.get_max_hold_minutes()
+    max_hold_seconds = max_hold_minutes * 60
+
+    # Get positions directly from MT5 to access open time
+    # client.get_positions() doesn't include time field
+    try:
+        mt5_positions = mt5.positions_get() if client._mt5 else []
+        if mt5_positions is None:
+            mt5_positions = []
+    except Exception as e:
+        logger.error("Failed to get MT5 positions for timeout check: %s", e)
+        return []
+
+    if not mt5_positions:
         return []
 
     results = []
     now = datetime.now(timezone.utc)
 
-    for pos in positions:
-        # MT5 doesn't provide open time in positions_get(), need to get order info
-        # For now, skip timeout check for MT5 or use a different approach
-        logger.debug("MT5 timeout check not yet implemented for ticket %s", pos["ticket"])
+    for pos in mt5_positions:
+        try:
+            # MT5 position.time is Unix timestamp in seconds
+            opened_at = datetime.fromtimestamp(pos.time, tz=timezone.utc)
+            hold_seconds = (now - opened_at).total_seconds()
+
+            if hold_seconds > max_hold_seconds:
+                logger.info(
+                    "MT5 TIMEOUT: %s %s (ticket %d) held %.0f min (max %d min) — closing",
+                    "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
+                    pos.symbol,
+                    pos.ticket,
+                    hold_seconds / 60,
+                    max_hold_minutes,
+                )
+
+                # Create OpenPosition for the close function
+                open_pos = OpenPosition(
+                    deal_id=str(pos.ticket),
+                    epic=pos.symbol,
+                    direction="BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
+                    size=float(pos.volume),
+                    level=float(pos.price_open),
+                    stop_level=_normalize_level(pos.sl),
+                    profit_level=_normalize_level(pos.tp),
+                    upl=float(pos.profit),
+                    created_date=opened_at.isoformat(),
+                )
+
+                close_result = mt5_close_position_by_symbol(client, open_pos)
+                results.append(close_result)
+
+            else:
+                logger.debug(
+                    "MT5 position %s %s (ticket %d) held %.0f/%d min — OK",
+                    pos.symbol,
+                    "BUY" if pos.type == mt5.POSITION_TYPE_BUY else "SELL",
+                    pos.ticket,
+                    hold_seconds / 60,
+                    max_hold_minutes,
+                )
+
+        except Exception as e:
+            logger.warning("Failed to check timeout for MT5 position %s: %s", getattr(pos, 'ticket', 'unknown'), e)
+            continue
 
     return results
 

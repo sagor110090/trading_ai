@@ -23,8 +23,36 @@ _TIMEFRAME_MAP: dict[Timeframe, str] = {
 
 # Capital.com epic identifiers for instruments
 _EPIC_MAP: dict[Symbol, str] = {
-    Symbol.XAUUSD: "GOLD",
+    # Crypto
     Symbol.BTCUSD: "BTCUSD",
+    Symbol.ETHUSD: "ETHUSD",
+    Symbol.SOLUSD: "SOLUSD",
+    Symbol.LTCUSD: "LTCUSD",
+    Symbol.BCHUSD: "BCHUSD",
+    Symbol.XRPUSD: "XRPUSD",
+    Symbol.BTCEUR: "BTCEUR",
+    Symbol.ETHGBP: "ETHGBP",
+    # Metals
+    Symbol.XAUUSD: "GOLD",
+    Symbol.XAGUSD: "SILVER",
+    # Indices
+    Symbol.US30: "US100",  # Wall St
+    Symbol.US500: "US500",  # US 500
+    Symbol.NAS100: "US100",  # US Tech 100
+    # Forex Majors
+    Symbol.EURUSD: "EURUSD",
+    Symbol.GBPUSD: "GBPUSD",
+    Symbol.USDJPY: "USDJPY",
+    Symbol.USDCHF: "USDCHF",
+    # Forex Minors
+    Symbol.EURGBP: "EURGBP",
+    Symbol.EURJPY: "EURJPY",
+    Symbol.GBPJPY: "GBPJPY",
+    Symbol.AUDUSD: "AUDUSD",
+    Symbol.NZDUSD: "NZDUSD",
+    Symbol.USDCAD: "USDCAD",
+    Symbol.EURAUD: "EURAUD",
+    Symbol.GBPCHF: "GBPCHF",
 }
 
 

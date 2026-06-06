@@ -1,6 +1,7 @@
 """MetaTrader 5 (MT5) client for candle data and trading."""
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,72 +56,112 @@ class MT5Client:
         self._connected = False
         self._mt5 = None
 
-    def connect(self) -> bool:
+    def connect(self, max_retries: int = 3) -> bool:
         """Connect to MT5 terminal using credentials from SETTINGS.
+
+        Args:
+            max_retries: Maximum number of connection attempts with exponential backoff.
 
         Note: MT5 terminal must be installed on your computer.
         """
-        try:
-            import MetaTrader5 as mt5
-            self._mt5 = mt5
+        for attempt in range(1, max_retries + 1):
+            try:
+                import MetaTrader5 as mt5
+                self._mt5 = mt5
 
-            # Get credentials from settings
-            mt5_cfg = SETTINGS.mt5
+                # Get credentials from settings
+                mt5_cfg = SETTINGS.mt5
 
-            logger.info("Attempting MT5 connection...")
-            logger.info("  Login: %s", mt5_cfg.login if mt5_cfg.login else "N/A")
-            logger.info("  Server: %s", mt5_cfg.server if mt5_cfg.server else "N/A")
-            logger.info("  Timeout: %d ms", mt5_cfg.timeout)
+                if attempt == 1:
+                    logger.info("Attempting MT5 connection...")
+                    logger.info("  Login: %s", mt5_cfg.login if mt5_cfg.login else "N/A")
+                    logger.info("  Server: %s", mt5_cfg.server if mt5_cfg.server else "N/A")
+                    logger.info("  Timeout: %d ms", mt5_cfg.timeout)
 
-            # Try to initialize with login if credentials provided
-            if mt5_cfg.login and mt5_cfg.server:
-                password = mt5_cfg.password if mt5_cfg.password else ""
+                # Try to initialize with login if credentials provided
+                if mt5_cfg.login and mt5_cfg.server:
+                    password = mt5_cfg.password if mt5_cfg.password else ""
 
-                logger.info("Initializing MT5 with credentials...")
-                if not mt5.initialize(
-                    login=mt5_cfg.login,
-                    password=password,
-                    server=mt5_cfg.server,
-                    timeout=mt5_cfg.timeout // 1000,  # Convert ms to seconds
-                ):
-                    error_code = mt5.last_error()
-                    logger.error("MT5 initialize() failed, error code = %s", error_code)
-                    logger.error("Possible issues:")
-                    logger.error("  1. MT5 terminal not installed")
-                    logger.error("  2. Incorrect login, password, or server name")
-                    logger.error("  3. Server name format (check with your broker)")
-                    logger.error("  4. Account is disabled or blocked")
+                    if not mt5.initialize(
+                        login=mt5_cfg.login,
+                        password=password,
+                        server=mt5_cfg.server,
+                        timeout=mt5_cfg.timeout // 1000,  # Convert ms to seconds
+                    ):
+                        error_code = mt5.last_error()
+                        logger.warning(
+                            "Attempt %d/%d: MT5 initialize() failed, error code = %s",
+                            attempt, max_retries, error_code
+                        )
+                        if attempt < max_retries:
+                            # Exponential backoff: 2s, 4s, 8s
+                            wait_time = 2 ** attempt
+                            logger.info("Retrying in %d seconds...", wait_time)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error("MT5 connection failed after %d attempts", max_retries)
+                            logger.error("Possible issues:")
+                            logger.error("  1. MT5 terminal not installed")
+                            logger.error("  2. Incorrect login, password, or server name")
+                            logger.error("  3. Server name format (check with your broker)")
+                            logger.error("  4. Account is disabled or blocked")
+                            return False
+
+                    # Verify login was successful
+                    account_info = mt5.account_info()
+                    if account_info is None:
+                        logger.warning("Attempt %d/%d: MT5 initialized but no account info", attempt, max_retries)
+                        if attempt < max_retries:
+                            wait_time = 2 ** attempt
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error("MT5 login failed after %d attempts - no account info", max_retries)
+                            mt5.shutdown()
+                            return False
+
+                    logger.info("MT5 initialized successfully: %s@%s", mt5_cfg.login, mt5_cfg.server)
+                    logger.info("  Account: %s", account_info.login)
+                    logger.info("  Server: %s", account_info.server)
+                    logger.info("  Balance: %s", account_info.balance)
+                else:
+                    # Try without login (terminal must be running and logged in)
+                    if not mt5.initialize():
+                        error_code = mt5.last_error()
+                        logger.warning(
+                            "Attempt %d/%d: MT5 initialize() failed, error code = %s",
+                            attempt, max_retries, error_code
+                        )
+                        if attempt < max_retries:
+                            wait_time = 2 ** attempt
+                            logger.info("Retrying in %d seconds...", wait_time)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            logger.error("MT5 terminal connection failed after %d attempts", max_retries)
+                            logger.error("MT5 terminal must be running and logged in")
+                            return False
+                    logger.info("MT5 initialized via terminal")
+
+                self._connected = True
+                logger.info("Connected to MetaTrader 5")
+                return True
+
+            except ImportError:
+                logger.error("MetaTrader5 library not installed. Install with: pip install MetaTrader5")
+                return False
+            except Exception as e:
+                logger.warning("Attempt %d/%d: Exception during MT5 connection: %s", attempt, max_retries, e)
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    logger.info("Retrying in %d seconds...", wait_time)
+                    time.sleep(wait_time)
+                else:
+                    logger.error("Failed to connect to MT5 after %d attempts: %s", max_retries, e)
                     return False
 
-                # Verify login was successful
-                account_info = mt5.account_info()
-                if account_info is None:
-                    logger.error("MT5 initialized but no account info - login may have failed")
-                    mt5.shutdown()
-                    return False
-
-                logger.info("MT5 initialized successfully: %s@%s", mt5_cfg.login, mt5_cfg.server)
-                logger.info("  Account: %s", account_info.login)
-                logger.info("  Server: %s", account_info.server)
-                logger.info("  Balance: %s", account_info.balance)
-            else:
-                # Try without login (terminal must be running and logged in)
-                logger.info("No MT5 credentials in .env, trying terminal connection...")
-                if not mt5.initialize():
-                    logger.error("MT5 initialize() failed, error code = %s", mt5.last_error())
-                    logger.error("MT5 terminal must be running and logged in")
-                    return False
-                logger.info("MT5 initialized via terminal")
-
-            self._connected = True
-            logger.info("Connected to MetaTrader 5")
-            return True
-        except ImportError:
-            logger.error("MetaTrader5 library not installed. Install with: pip install MetaTrader5")
-            return False
-        except Exception as e:
-            logger.error("Failed to connect to MT5: %s", e)
-            return False
+        return False
 
     def _ensure_connected(self) -> None:
         if not self._connected:
