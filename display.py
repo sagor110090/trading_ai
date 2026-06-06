@@ -301,6 +301,38 @@ def display_weekly_close_positions_closed(count: int, symbol: str) -> None:
     console.print(Panel(content, title="[bold yellow]Weekly Close[/]", border_style="yellow", padding=(0, 2)))
 
 
+def display_weekly_close_status(symbol: str, hours_until: float, should_stop: bool, should_close: bool, show_always: bool = False) -> None:
+    """Display weekly close status for a symbol.
+
+    Args:
+        symbol: The trading symbol
+        hours_until: Hours until weekly close
+        should_stop: Whether new trades should be stopped
+        should_close: Whether positions should be closed
+        show_always: If True, show status even when not in window
+    """
+    if hours_until < 24:
+        time_str = f"{hours_until:.1f} hours"
+    else:
+        time_str = f"{hours_until / 24:.1f} days"
+
+    if should_close:
+        status = "[red]CLOSING POSITIONS[/]"
+        icon = "[red]![/]"
+    elif should_stop:
+        status = "[yellow]STOP NEW TRADES[/]"
+        icon = "[yellow]![/]"
+    elif show_always:
+        status = "[dim]Weekly close pending[/]"
+        icon = "[dim]i[/]"
+    else:
+        return  # Don't show if not in window and not showing always
+
+    console.print(
+        f"  {icon}  Weekly close in {time_str} for {symbol} - {status}"
+    )
+
+
 def display_cycle_summary(stats: dict) -> None:
     """Print end-of-cycle summary panel."""
     lines = []

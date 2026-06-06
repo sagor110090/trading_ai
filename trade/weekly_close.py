@@ -92,7 +92,7 @@ def has_weekly_close(asset_class: str) -> bool:
 
 def check_weekly_close_status(
     symbol: str,
-    close_day: int = 5,  # Friday (0=Monday, 6=Sunday)
+    close_day: int = 4,  # Friday (0=Monday, 6=Sunday)
     close_time_utc: str = "22:00",  # 5 PM EST
     stop_new_trades_hours: float = 2.0,
     close_positions_hours: float = 0.5,
@@ -181,33 +181,6 @@ def check_weekly_close_status(
         message=message,
         asset_class=asset_class,
     )
-
-
-def is_weekly_close_window(
-    symbol: str,
-    close_day: int = 5,
-    close_time_utc: str = "22:00",
-    window_hours: float = 2.0,
-) -> bool:
-    """Quick check if we're within the weekly close window.
-
-    Args:
-        symbol: The symbol to check
-        close_day: Day of week for close (5 = Friday)
-        close_time_utc: Close time in UTC (HH:MM format)
-        window_hours: Hours before close to consider "in window"
-
-    Returns:
-        True if we're within the weekly close window
-    """
-    status = check_weekly_close_status(
-        symbol=symbol,
-        close_day=close_day,
-        close_time_utc=close_time_utc,
-        stop_new_trades_hours=window_hours,
-        close_positions_hours=window_hours,
-    )
-    return status.should_stop_new_trades
 
 
 def get_symbols_with_weekly_close(symbols: list[str]) -> dict[str, str]:

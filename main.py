@@ -47,6 +47,7 @@ from display import (
     display_trade_skipped_existing,
     display_verification_summary,
     display_weekly_close_positions_closed,
+    display_weekly_close_status,
 )
 from indicators.features import compute_all_features
 from ml.predictor import Prediction, predict_signal
@@ -458,6 +459,7 @@ def run_signal_cycle(
             _check_timeouts(client, stats, position_manager, symbol.value)
 
         # ── 0.5. Check weekly close ────────────────────────────────────────
+        skip_symbol = False
         if SETTINGS.weekly_close.enabled:
             close_status = check_weekly_close_status(
                 symbol=symbol.value,
@@ -465,15 +467,28 @@ def run_signal_cycle(
                 close_time_utc=SETTINGS.weekly_close.close_time_utc,
                 close_positions_hours=SETTINGS.weekly_close.close_positions_hours,
             )
+            # Display weekly close status (only for symbols with weekly close)
+            if close_status.hours_until_close is not None:
+                display_weekly_close_status(
+                    symbol=symbol.value,
+                    hours_until=close_status.hours_until_close,
+                    should_stop=close_status.should_stop_new_trades,
+                    should_close=close_status.should_close_positions,
+                    show_always=True,
+                )
             # Close positions if we're in the weekly close window
             if close_status.should_close_positions and SETTINGS.auto_trade:
                 closed = position_manager.close_all_for_weekly_close(symbol.value)
                 if closed:
                     display_weekly_close_positions_closed(len(closed), symbol.value)
                     stats["weekly_close_closed"] = len(closed)
-            # Log status if we're approaching weekly close
-            elif close_status.should_stop_new_trades:
-                logger.info("Weekly close approaching: %s - %s", symbol.value, close_status.message)
+            # Skip analysis during weekly close window (no new data)
+            if close_status.should_stop_new_trades:
+                logger.info("Skipping %s analysis during weekly close: %s", symbol.value, close_status.message)
+                skip_symbol = True
+
+        if skip_symbol:
+            continue
 
         # ── 1. Fetch and store candles ──────────────────────────────────
         candle_results: dict[str, int] = {}

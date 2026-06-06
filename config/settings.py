@@ -253,8 +253,8 @@ class WeeklyCloseConfig:
     """
     # Weekly close time (UTC) - Friday 22:00 UTC = 5 PM EST
     close_time_utc: str = "22:00"
-    # Day of week (5 = Friday, where Monday=0, Sunday=6)
-    close_day: int = 5
+    # Day of week (4 = Friday, where Monday=0, Sunday=6)
+    close_day: int = 4
     # Hours before close to stop new trades (2.0 hours = 3 PM EST)
     stop_new_trades_hours: float = 2.0
     # Hours before close to close existing positions (0.5 hours = 30 min = 4:30 PM EST)
