@@ -304,10 +304,41 @@ class Settings:
     auto_trade: bool = False
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
     broker_spread_pips: float = 0.0  # Broker execution speed/spread buffer in pips
+    # Per-symbol SL/TP multipliers (fallback to trade mode defaults)
+    sl_multipliers: dict = field(default_factory=lambda: {})
+    tp_multipliers: dict = field(default_factory=lambda: {})
 
     def get_trade_size(self, symbol: str) -> float:
         """Get position size for a symbol. Falls back to DEFAULT."""
         return self.trade_sizes.get(symbol, self.trade_sizes.get("DEFAULT", 0.01))
+
+    def get_sl_tp_multipliers(self, symbol: str) -> tuple[float, float]:
+        """Get SL and TP multipliers for a symbol.
+
+        Returns:
+            (sl_multiplier, tp_multiplier)
+
+        Falls back to trade mode defaults if not set per-symbol.
+        """
+        sl_mult = self.sl_multipliers.get(symbol)
+        tp_mult = self.tp_multipliers.get(symbol)
+
+        if sl_mult is None or tp_mult is None:
+            # Use trade mode defaults
+            if self.trade_mode == TradeMode.SCALPING:
+                default_sl = self.scalping.sl_atr_mult
+                default_tp = self.scalping.tp_atr_mult
+            elif self.trade_mode == TradeMode.DAY_TRADING:
+                default_sl = self.day_trading.sl_atr_mult
+                default_tp = self.day_trading.tp_atr_mult
+            else:  # SWING
+                default_sl = self.swing.sl_atr_mult
+                default_tp = self.swing.tp_atr_mult
+
+            return (sl_mult if sl_mult is not None else default_sl,
+                    tp_mult if tp_mult is not None else default_tp)
+
+        return sl_mult, tp_mult
 
     def get_prediction_threshold(self, symbol: str) -> float:
         """Get ML prediction threshold for a symbol. Falls back to DEFAULT."""
@@ -420,6 +451,23 @@ def load_settings() -> Settings:
             except ValueError:
                 pass
 
+    # Read all SL_MULTIPLIER_<SYMBOL> and TP_MULTIPLIER_<SYMBOL> from env
+    sl_multipliers = {}
+    tp_multipliers = {}
+    for key, value in os.environ.items():
+        if key.startswith("SL_MULTIPLIER_"):
+            symbol_name = key.replace("SL_MULTIPLIER_", "")
+            try:
+                sl_multipliers[symbol_name] = float(value)
+            except ValueError:
+                pass
+        elif key.startswith("TP_MULTIPLIER_"):
+            symbol_name = key.replace("TP_MULTIPLIER_", "")
+            try:
+                tp_multipliers[symbol_name] = float(value)
+            except ValueError:
+                pass
+
     # Model directory — absolute path so it works regardless of CWD
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
     auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
@@ -479,6 +527,8 @@ def load_settings() -> Settings:
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         trade_sizes=trade_sizes,
+        sl_multipliers=sl_multipliers,
+        tp_multipliers=tp_multipliers,
         symbols=symbols,
         position_monitor_interval=int(os.getenv("POSITION_MONITOR_INTERVAL", "30")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

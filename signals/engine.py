@@ -231,8 +231,10 @@ def generate_signal_scalping(
         return None
 
     entry = round(live_price if live_price is not None else h1_close, 5)
+    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
+    sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
-        h1_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
+        h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
     )
 
     return TradeSignal(
@@ -330,8 +332,10 @@ def generate_signal_day_trading(
         return None
 
     entry = round(live_price if live_price is not None else h1_close, 5)
+    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
+    sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
-        h1_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
+        h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
     )
 
     return TradeSignal(
@@ -424,8 +428,10 @@ def generate_signal_swing(
         return None
 
     entry = round(live_price if live_price is not None else h1_close, 5)
+    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
+    sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
-        signal_dir, entry, h1_feat.atr14, symbol, cfg.sl_atr_mult, cfg.tp_atr_mult,
+        signal_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
     )
 
     return TradeSignal(
