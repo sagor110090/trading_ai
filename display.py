@@ -281,40 +281,50 @@ def display_weekly_close_positions_closed(count: int, symbol: str) -> None:
     content = (
         f"  [yellow]🏁 WEEKLY CLOSE[/]  [white]{symbol}[/]\n"
         f"  [dim]Closed {count} position{'s' if count != 1 else ''} before weekly market close[/]\n"
-        f"  [dim]Markets close Friday 22:00 UTC (5 PM EST)[/]"
+        f"  [dim]Exness: Markets close Saturday 02:58/02:59 AM BST (UTC+6)[/]"
     )
     console.print(Panel(content, title="[bold yellow]Weekly Close[/]", border_style="yellow", padding=(0, 2)))
 
 
-def display_weekly_close_status(symbol: str, hours_until: float, should_stop: bool, should_close: bool, show_always: bool = False) -> None:
+def display_weekly_close_status(
+    symbol: str,
+    hours_until: float | None,
+    should_stop: bool,
+    should_close: bool,
+    is_weekend: bool = False,
+    message: str = "",
+    show_always: bool = False,
+) -> None:
     """Display weekly close status for a symbol.
 
     Args:
         symbol: The trading symbol
-        hours_until: Hours until weekly close
+        hours_until: Hours until weekly close (None if weekend)
         should_stop: Whether new trades should be stopped
         should_close: Whether positions should be closed
+        is_weekend: Whether market is closed for weekend
+        message: Status message to display
         show_always: If True, show status even when not in window
     """
-    if hours_until < 24:
-        time_str = f"{hours_until:.1f} hours"
-    else:
-        time_str = f"{hours_until / 24:.1f} days"
-
-    if should_close:
+    if is_weekend:
+        # Weekend mode - market is closed
+        status = "[red]WEEKEND - MARKET CLOSED[/]"
+        icon = "[red]![/]"
+    elif should_close:
         status = "[red]CLOSING POSITIONS[/]"
         icon = "[red]![/]"
     elif should_stop:
         status = "[yellow]STOP NEW TRADES[/]"
         icon = "[yellow]![/]"
-    elif show_always:
-        status = "[dim]Weekly close pending[/]"
-        icon = "[dim]i[/]"
+    elif show_always and message:
+        # Just show the message
+        console.print(f"  [dim]i[/]  {message}")
+        return
     else:
         return  # Don't show if not in window and not showing always
 
     console.print(
-        f"  {icon}  Weekly close in {time_str} for {symbol} - {status}"
+        f"  {icon}  {message} - {status}"
     )
 
 

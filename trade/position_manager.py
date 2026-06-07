@@ -89,7 +89,7 @@ class CooldownEntry:
 @dataclass
 class TradeDecision:
     """Result of checking whether a trade should be placed."""
-    action: str  # "place", "skip_cooldown", "reverse_and_place"
+    action: str  # "place", "skip_cooldown", "reverse_and_place", "skip_correlation"
     reason: str
     existing_position: Optional[OpenPosition] = None
     cooldown_remaining_minutes: float = 0.0
@@ -225,7 +225,18 @@ class PositionManager:
                             existing_position=pos,
                         )
 
-        # 3. No position, no cooldown → place trade
+        # 3. Check correlation limits (prevent overexposure in correlated groups)
+        from trade.correlation import check_correlation_limit
+
+        correlation_check = check_correlation_limit(symbol, self.client)
+        if not correlation_check.allowed:
+            return TradeDecision(
+                action="skip_correlation",
+                reason=correlation_check.reason,
+                cooldown_remaining_minutes=0.0,
+            )
+
+        # 4. No position, no cooldown, no correlation issue → place trade
         return TradeDecision(
             action="place",
             reason="No open position or cooldown",
@@ -368,8 +379,7 @@ class PositionManager:
 
         close_status = check_weekly_close_status(
             symbol=symbol,
-            close_day=SETTINGS.weekly_close.close_day,
-            close_time_utc=SETTINGS.weekly_close.close_time_utc,
+            stop_new_trades_hours=SETTINGS.weekly_close.stop_new_trades_hours,
             close_positions_hours=SETTINGS.weekly_close.close_positions_hours,
         )
         return close_status.should_close_positions

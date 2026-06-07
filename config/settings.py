@@ -220,6 +220,10 @@ class MLConfig:
     min_verified_for_filter: int = 50
     # Auto-train models during live trading (recommended: false - train via backtest instead)
     auto_train: bool = False
+    # Drift detection settings
+    drift_detection_enabled: bool = True
+    min_signals_for_drift: int = 20
+    drift_threshold: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -232,32 +236,42 @@ class WalkForwardConfig:
 @dataclass(frozen=True)
 class VerificationConfig:
     # Max candles to check for SL/TP hit before declaring BREAKEVEN
-    # Scalping: trades resolve in 30-60min → 24 candles
-    # Day trading: hours → 100 candles (8+ hours)
-    # Swing: days → 200 candles
     # If SL/TP is hit within fewer candles, it's verified immediately.
+    # Dynamic calculation: max_hold_minutes / 5 (for M5 candles)
+    # - Scalping (30 min) → 6 candles
+    # - Day trading (120 min) → 24 candles
+    # - Swing (480 min) → 96 candles
+    # This value is used as fallback when dynamic calculation is not available.
     lookahead_candles: int = 100
     # Minimum candles before we try to verify. If fewer candles exist after
     # the signal, we skip it (not enough data yet). Set low so early
     # SL/TP hits get caught quickly.
     min_lookahead_candles: int = 5
     breakeven_threshold_pips: float = 1.0
+    # Enable dynamic lookahead based on trade mode (recommended)
+    dynamic_lookahead: bool = True
 
 
 @dataclass(frozen=True)
 class WeeklyCloseConfig:
     """Configuration for weekly market close handling.
 
-    Forex markets close at Friday 22:00 UTC (5 PM EST).
+    Uses Bangladesh Time (Asia/Dhaka UTC+6) for Exness market hours:
+    - Forex (EURUSD, GBPUSD, etc.): Close Saturday 02:59 AM BST, Open Monday 03:05 AM BST
+    - Gold (XAUUSD): Close Saturday 02:58 AM BST, Open Monday 04:05 AM BST
+
     Time values are in decimal hours: 0.5 = 30 minutes, 2.0 = 2 hours.
+
+    Note: close_time_utc and close_day are kept for config compatibility but
+    are no longer used (actual close times are hardcoded in weekly_close.py).
     """
-    # Weekly close time (UTC) - Friday 22:00 UTC = 5 PM EST
+    # Weekly close time (UTC) - DEPRECATED, now uses Bangladesh time in weekly_close.py
     close_time_utc: str = "22:00"
-    # Day of week (4 = Friday, where Monday=0, Sunday=6)
+    # Day of week (4 = Friday, where Monday=0, Sunday=6) - DEPRECATED
     close_day: int = 4
-    # Hours before close to stop new trades (2.0 hours = 3 PM EST)
+    # Hours before close to stop new trades
     stop_new_trades_hours: float = 2.0
-    # Hours before close to close existing positions (0.5 hours = 30 min = 4:30 PM EST)
+    # Hours before close to close existing positions
     close_positions_hours: float = 0.5
     # Enable/disable weekly close handling
     enabled: bool = True
@@ -278,6 +292,14 @@ class Settings:
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     weekly_close: WeeklyCloseConfig = field(default_factory=WeeklyCloseConfig)
+    # Max positions per correlation group (prevents overexposure)
+    max_positions_per_group: dict = field(default_factory=lambda: {
+        "CRYPTO": 1,
+        "METALS": 1,
+        "FOREX_MAJOR": 2,
+        "FOREX_MINOR": 2,
+        "INDICES": 1,
+    })
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
@@ -299,6 +321,30 @@ class Settings:
             return self.day_trading.max_hold_minutes
         else:
             return self.swing.max_hold_minutes
+
+    def get_dynamic_lookahead(self) -> int:
+        """Get dynamic verification lookahead based on trade mode.
+
+        Uses M5 candles for verification (finest granularity).
+        Formula: max_hold_minutes / 5 (for 5-minute candles)
+
+        Examples:
+        - Scalping (30 min) → 6 candles
+        - Day trading (120 min) → 24 candles
+        - Swing (480 min) → 96 candles
+
+        Returns:
+            Number of M5 candles to check for SL/TP hit.
+        """
+        if not self.verification.dynamic_lookahead:
+            return self.verification.lookahead_candles
+
+        max_hold = self.get_max_hold_minutes()
+        # Divide by 5 for M5 candles, minimum of 5
+        dynamic_candles = max(max_hold // 5, self.verification.min_lookahead_candles)
+
+        # Cap at reasonable maximum (swing should still be reasonable)
+        return min(dynamic_candles, 200)
 
     symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
@@ -378,10 +424,27 @@ def load_settings() -> Settings:
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
     auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
 
+    # Drift detection settings
+    drift_detection_enabled = os.getenv("ML_DRIFT_DETECTION_ENABLED", "true").lower() == "true"
+    min_signals_for_drift = int(os.getenv("ML_MIN_SIGNALS_FOR_DRIFT", "20"))
+    drift_threshold = float(os.getenv("ML_DRIFT_THRESHOLD", "0.15"))
+
     # Weekly close settings
     weekly_close_enabled = os.getenv("WEEKLY_CLOSE_ENABLED", "true").lower() == "true"
     weekly_close_stop_new_trades = float(os.getenv("WEEKLY_CLOSE_STOP_NEW_TRADES_HOURS", "2.0"))
     weekly_close_close_positions = float(os.getenv("WEEKLY_CLOSE_CLOSE_POSITIONS_HOURS", "0.5"))
+
+    # Verification settings
+    dynamic_lookahead = os.getenv("DYNAMIC_LOOKAHEAD", "true").lower() == "true"
+
+    # Correlation limit settings
+    max_positions_per_group = {
+        "CRYPTO": int(os.getenv("MAX_POSITIONS_CRYPTO", "1")),
+        "METALS": int(os.getenv("MAX_POSITIONS_METALS", "1")),
+        "FOREX_MAJOR": int(os.getenv("MAX_POSITIONS_FOREX_MAJOR", "2")),
+        "FOREX_MINOR": int(os.getenv("MAX_POSITIONS_FOREX_MINOR", "2")),
+        "INDICES": int(os.getenv("MAX_POSITIONS_INDICES", "1")),
+    }
 
     # Read all ML_PREDICTION_THRESHOLD_<SYMBOL> from env
     prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))}
@@ -398,12 +461,21 @@ def load_settings() -> Settings:
         mt5=mt5_cfg,
         trading_platform=trading_platform,
         database=db_cfg,
-        ml=MLConfig(model_dir=model_dir, prediction_thresholds=prediction_thresholds, auto_train=auto_train),
+        ml=MLConfig(
+            model_dir=model_dir,
+            prediction_thresholds=prediction_thresholds,
+            auto_train=auto_train,
+            drift_detection_enabled=drift_detection_enabled,
+            min_signals_for_drift=min_signals_for_drift,
+            drift_threshold=drift_threshold,
+        ),
         weekly_close=WeeklyCloseConfig(
             enabled=weekly_close_enabled,
             stop_new_trades_hours=weekly_close_stop_new_trades,
             close_positions_hours=weekly_close_close_positions,
         ),
+        verification=VerificationConfig(dynamic_lookahead=dynamic_lookahead),
+        max_positions_per_group=max_positions_per_group,
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         trade_sizes=trade_sizes,

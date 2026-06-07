@@ -1,19 +1,25 @@
 """Weekly close management for forex and related markets.
 
-Forex markets close at Friday 22:00 UTC (5 PM EST). This module handles:
-- Detecting when we approach weekly close
-- Determining if new trades should be blocked
-- Determining if existing positions should be closed
-- Handling different asset classes (forex vs crypto which is 24/7)
+Uses Bangladesh Time (Asia/Dhaka UTC+6) for Exness market hours:
+- Forex: Close Saturday 02:59 AM BST, Open Monday 03:05 AM BST
+- Gold (XAUUSD): Close Saturday 02:58 AM BST, Open Monday 04:05 AM BST
 """
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, time
+from datetime import datetime, time, timedelta
 
 from config.utils import normalize_symbol
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
 logger = logging.getLogger(__name__)
+
+# Bangladesh Time (UTC+6)
+TZ_DHAKA = ZoneInfo("Asia/Dhaka")
 
 
 # Asset class definitions
@@ -49,6 +55,7 @@ class WeeklyCloseStatus:
     should_close_positions: bool  # True if existing positions should be closed
     message: str  # Human-readable status message
     asset_class: str  # Asset class of the symbol
+    is_weekend: bool = False  # True if market is closed for weekend
 
 
 def get_asset_class(symbol: str) -> str:
@@ -90,10 +97,48 @@ def has_weekly_close(asset_class: str) -> bool:
     return asset_class in (ASSET_CLASS_FOREX, ASSET_CLASS_METALS, ASSET_CLASS_INDICES)
 
 
+# Market hours in Bangladesh Time (Exness)
+# Close: Saturday morning, Open: Monday morning
+FOREX_CLOSE_DAY = 5  # Saturday (0=Monday, 6=Sunday)
+FOREX_CLOSE_TIME = "02:59"
+FOREX_OPEN_DAY = 0   # Monday
+FOREX_OPEN_TIME = "03:05"
+
+GOLD_CLOSE_DAY = 5   # Saturday
+GOLD_CLOSE_TIME = "02:58"
+GOLD_OPEN_DAY = 0    # Monday
+GOLD_OPEN_TIME = "04:05"
+
+
+def _get_market_hours(asset_class: str) -> tuple:
+    """Get market close/open times for asset class.
+
+    Returns:
+        (close_day, close_time, open_day, open_time) in BST
+    """
+    if asset_class == ASSET_CLASS_METALS:
+        return (GOLD_CLOSE_DAY, GOLD_CLOSE_TIME, GOLD_OPEN_DAY, GOLD_OPEN_TIME)
+    else:
+        return (FOREX_CLOSE_DAY, FOREX_CLOSE_TIME, FOREX_OPEN_DAY, FOREX_OPEN_TIME)
+
+
+def _parse_time_str(time_str: str) -> time:
+    """Parse HH:MM string to time object."""
+    hour, minute = map(int, time_str.split(":"))
+    return time(hour=hour, minute=minute)
+
+
+def _get_next_weekday(base_date: datetime, target_day: int) -> datetime:
+    """Get next occurrence of target weekday."""
+    current_day = base_date.weekday()
+    days_ahead = target_day - current_day
+    if days_ahead <= 0:
+        days_ahead += 7
+    return base_date + timedelta(days=days_ahead)
+
+
 def check_weekly_close_status(
     symbol: str,
-    close_day: int = 4,  # Friday (0=Monday, 6=Sunday)
-    close_time_utc: str = "22:00",  # 5 PM EST
     stop_new_trades_hours: float = 2.0,
     close_positions_hours: float = 0.5,
 ) -> WeeklyCloseStatus:
@@ -101,13 +146,11 @@ def check_weekly_close_status(
 
     Args:
         symbol: The symbol to check
-        close_day: Day of week for close (5 = Friday)
-        close_time_utc: Close time in UTC (HH:MM format)
         stop_new_trades_hours: Hours before close to stop new trades
         close_positions_hours: Hours before close to close positions
 
     Returns:
-        WeeklyCloseStatus with current state
+        WeeklyCloseStatus with current state (uses Bangladesh Time)
     """
     asset_class = get_asset_class(symbol)
 
@@ -118,68 +161,105 @@ def check_weekly_close_status(
             hours_until_close=None,
             should_stop_new_trades=False,
             should_close_positions=False,
-            message=f"{asset_class} - 24/7 market, no weekly close",
+            message=f"{asset_class} - 24/7 market",
             asset_class=asset_class,
+            is_weekend=False,
         )
 
-    now = datetime.now(timezone.utc)
-    current_day = now.weekday()  # 0=Monday, 6=Sunday
-    current_time = now.time()
+    now = datetime.now(TZ_DHAKA)
+    close_day, close_time_str, open_day, open_time_str = _get_market_hours(asset_class)
+    close_time = _parse_time_str(close_time_str)
+    open_time = _parse_time_str(open_time_str)
 
-    # Parse close time
-    try:
-        close_hour, close_minute = map(int, close_time_utc.split(":"))
-        close_time = time(close_hour, close_minute)
-    except (ValueError, AttributeError):
-        logger.error("Invalid close_time_utc format: %s", close_time_utc)
-        close_hour, close_minute = 22, 0
-        close_time = time(close_hour, close_minute)
+    # Get last close (previous Saturday) and next close (coming Saturday)
+    last_close = _get_next_weekday(now - timedelta(days=7), close_day)
+    last_close = last_close.replace(
+        hour=close_time.hour,
+        minute=close_time.minute,
+        second=0,
+        microsecond=0,
+    )
 
-    # Calculate seconds until close
-    # Convert times to seconds since midnight for comparison
-    current_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
-    close_seconds = close_time.hour * 3600 + close_time.minute * 60
+    next_close = _get_next_weekday(now, close_day)
+    next_close = next_close.replace(
+        hour=close_time.hour,
+        minute=close_time.minute,
+        second=0,
+        microsecond=0,
+    )
 
-    # Calculate days until close (handling week wrap)
-    if current_day < close_day:
-        days_until = close_day - current_day
-    elif current_day > close_day:
-        days_until = 7 - current_day + close_day
-    else:  # Same day
-        if current_seconds < close_seconds:
-            days_until = 0
+    # Get next open (coming Monday at open_time)
+    next_open = _get_next_weekday(now, open_day)
+    next_open = next_open.replace(
+        hour=open_time.hour,
+        minute=open_time.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    # Check if we're in weekend (after last Saturday close, before next Monday open)
+    # If current Monday is BEFORE open time, we need the previous close
+    # If current Monday is AFTER open time, we need the current/next close
+    current_day = now.weekday()
+
+    # Special case: Monday before open time = still weekend
+    if current_day == open_day and now.hour < open_time.hour:
+        # Monday early morning before open - still weekend, last close was previous Saturday
+        pass  # next_open is already correct (today at open time)
+    # Check if we're after Saturday close = weekend started
+    elif now > last_close:
+        # Weekend has started, next_open should be the coming Monday
+        # If next_open is in the past (already passed this week's Monday open),
+        # we need to get next week's Monday
+        if next_open < now:
+            next_open = next_open + timedelta(days=7)
+
+    is_weekend = now > last_close and now < next_open
+
+    if is_weekend:
+        # Market is closed for weekend
+        hours_until_open = (next_open - now).total_seconds() / 3600
+
+        if hours_until_open < 24:
+            message = f"Weekend - Opens in {hours_until_open:.1f}h"
         else:
-            days_until = 7  # Next week
+            message = f"Weekend - Opens in {hours_until_open / 24:.1f} days"
 
-    # Calculate total seconds and hours until close
-    if days_until == 0:
-        seconds_until = close_seconds - current_seconds
-    else:
-        seconds_until = days_until * 86400 + (close_seconds - current_seconds)
+        return WeeklyCloseStatus(
+            is_active=True,
+            hours_until_close=None,
+            should_stop_new_trades=True,
+            should_close_positions=True,
+            message=message,
+            asset_class=asset_class,
+            is_weekend=True,
+        )
 
-    hours_until = seconds_until / 3600
+    # Market is open, calculate hours until close
+    hours_until_close = (next_close - now).total_seconds() / 3600
 
     # Determine if we should stop new trades or close positions
-    should_stop = hours_until <= stop_new_trades_hours
-    should_close = hours_until <= close_positions_hours
+    should_stop = hours_until_close <= stop_new_trades_hours
+    should_close = hours_until_close <= close_positions_hours
 
     # Build message
     if should_close:
-        message = f"Weekly close in {hours_until:.1f}h - positions closing"
+        message = f"Weekly close in {hours_until_close:.1f}h - positions closing"
     elif should_stop:
-        message = f"Weekly close in {hours_until:.1f}h - no new trades"
-    elif hours_until < 24:
-        message = f"Weekly close in {hours_until:.1f}h"
+        message = f"Weekly close in {hours_until_close:.1f}h - no new trades"
+    elif hours_until_close < 24:
+        message = f"Weekly close in {hours_until_close:.1f}h"
     else:
-        message = f"Weekly close in {hours_until / 24:.1f} days"
+        message = f"Weekly close in {hours_until_close / 24:.1f} days"
 
     return WeeklyCloseStatus(
         is_active=should_stop or should_close,
-        hours_until_close=hours_until,
+        hours_until_close=hours_until_close,
         should_stop_new_trades=should_stop,
         should_close_positions=should_close,
         message=message,
         asset_class=asset_class,
+        is_weekend=False,
     )
 
 

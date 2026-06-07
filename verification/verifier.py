@@ -170,6 +170,9 @@ def verify_pending_signals(symbol: str) -> int:
 
     Returns the number of signals newly verified.
     """
+    # Get dynamic lookahead based on current trade mode
+    dynamic_lookahead = SETTINGS.get_dynamic_lookahead()
+
     with get_session() as session:
         verified_count = 0
 
@@ -200,8 +203,8 @@ def verify_pending_signals(symbol: str) -> int:
         )
 
         logger.info(
-            "Verifying %d pending signals for %s using %d M5 candles",
-            len(pending_signals), symbol, len(m5_candles),
+            "Verifying %d pending signals for %s using %d M5 candles (lookahead: %d)",
+            len(pending_signals), symbol, len(m5_candles), dynamic_lookahead,
         )
 
         for sig in pending_signals:
@@ -221,8 +224,8 @@ def verify_pending_signals(symbol: str) -> int:
                 )
                 continue
 
-            # Check up to min(available candles, lookahead_candles)
-            candles_to_check = sig_candles[:VERIFICATION_CONFIG.lookahead_candles]
+            # Check up to min(available candles, dynamic_lookahead)
+            candles_to_check = sig_candles[:dynamic_lookahead]
             result = verify_signal(sig, candles_to_check)
             if result:
                 verification = SignalVerification(

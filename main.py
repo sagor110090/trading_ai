@@ -48,6 +48,7 @@ from display import (
     display_weekly_close_status,
 )
 from indicators.features import compute_all_features
+from ml.drift_detection import check_model_drift, sync_verified_signals_for_drift, track_ml_prediction, update_prediction_outcome
 from ml.predictor import Prediction, predict_signal
 from signals.engine import TradeSignal, generate_signal
 from trade.executor import (
@@ -443,6 +444,8 @@ def run_signal_cycle(
             "trade_cooldown": False,
             "trade_reversed": False,
             "trade_failed": False,
+            "trade_correlation_blocked": False,
+            "ml_drift_detected": False,
             "verified": 0,
             "auto_train_started": False,
             "timeout_closed": False,
@@ -461,17 +464,18 @@ def run_signal_cycle(
         if SETTINGS.weekly_close.enabled:
             close_status = check_weekly_close_status(
                 symbol=symbol.value,
-                close_day=SETTINGS.weekly_close.close_day,
-                close_time_utc=SETTINGS.weekly_close.close_time_utc,
+                stop_new_trades_hours=SETTINGS.weekly_close.stop_new_trades_hours,
                 close_positions_hours=SETTINGS.weekly_close.close_positions_hours,
             )
-            # Display weekly close status (only for symbols with weekly close)
-            if close_status.hours_until_close is not None:
+            # Display weekly close status (for all symbols with weekly close)
+            if close_status.hours_until_close is not None or close_status.is_weekend:
                 display_weekly_close_status(
                     symbol=symbol.value,
                     hours_until=close_status.hours_until_close,
                     should_stop=close_status.should_stop_new_trades,
                     should_close=close_status.should_close_positions,
+                    is_weekend=close_status.is_weekend,
+                    message=close_status.message,
                     show_always=True,
                 )
             # Close positions if we're in the weekly close window
@@ -523,6 +527,26 @@ def run_signal_cycle(
         # Register verified losses as cooldowns
         if verified > 0:
             _register_verified_results(symbol.value, position_manager)
+
+            # Sync verified signals with drift detection
+            if SETTINGS.ml.drift_detection_enabled:
+                try:
+                    synced = sync_verified_signals_for_drift(symbol.value)
+                    if synced > 0:
+                        logger.debug("Synced %d predictions with outcomes for drift detection", synced)
+
+                    # Check for drift periodically (every 10 verifications)
+                    if verified >= 10 or synced >= 10:
+                        drift_report = check_model_drift(symbol.value)
+                        if drift_report and drift_report.drift_detected:
+                            console.print(Panel(
+                                drift_report.message,
+                                title="[bold red]⚠ ML Model Drift Alert[/]",
+                                border_style="red",
+                            ))
+                            stats["ml_drift_detected"] = True
+                except Exception as e:
+                    logger.warning("Drift detection error: %s", e)
 
         # ── 3. Check if we should skip signal generation ─────────────────
         should_generate, skip_reason = position_manager.should_generate_signal(symbol.value)
@@ -590,6 +614,18 @@ def run_signal_cycle(
                         else:
                             stats["ml_approved"] = True
                             display_ml_prediction(prediction, threshold, blocked=False)
+
+                        # Track prediction for drift detection
+                        try:
+                            track_ml_prediction(
+                                signal_id=trade_signal.signal_id,
+                                symbol=trade_signal.symbol,
+                                model_type=prediction.model_type,
+                                model_version=prediction.model_version,
+                                ml_probability=prediction.probability,
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to track ML prediction: %s", e)
                     else:
                         stats["no_ml"] = True
                         display_no_ml_model()
@@ -631,6 +667,18 @@ def run_signal_cycle(
                     else:
                         stats["ml_approved"] = True
                         display_ml_prediction(prediction, threshold, blocked=False)
+
+                    # Track prediction for drift detection
+                    try:
+                        track_ml_prediction(
+                            signal_id=trade_signal.signal_id,
+                            symbol=trade_signal.symbol,
+                            model_type=prediction.model_type,
+                            model_version=prediction.model_version,
+                            ml_probability=prediction.probability,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to track ML prediction: %s", e)
                 else:
                     stats["no_ml"] = True
                     display_no_ml_model()
@@ -691,6 +739,15 @@ def _handle_trade_decision(
         # Same direction position already open - skip
         display_trade_skipped_existing(trade_signal.symbol)
         stats["trade_skipped"] = True
+        return False  # No new trade placed
+
+    if decision.action == "skip_correlation":
+        # Correlation limit reached - skip
+        console.print(
+            f"  [yellow]⚠ Correlation limit:[/] {decision.reason}"
+        )
+        stats["trade_skipped"] = True
+        stats["trade_correlation_blocked"] = True
         return False  # No new trade placed
 
     if decision.action == "reverse_and_place":

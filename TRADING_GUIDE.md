@@ -14,17 +14,27 @@ The system automatically handles weekly market close for forex, metals, and indi
 
 ### What It Does
 
-- **Stops new trades** 2 hours before weekly close (Friday 20:00 UTC / 3 PM EST)
-- **Closes existing positions** 30 minutes before close (Friday 21:30 UTC / 4:30 PM EST)
+- **Stops new trades** 2 hours before weekly close
+- **Closes existing positions** 30 minutes before close
 - **Crypto markets are unaffected** (BTCUSD, ETHUSD, etc. trade 24/7)
+- **Detects weekend** - Skips analysis when market is closed
 
-### Timeline
+### Market Hours (Exness - Bangladesh Time UTC+6)
 
-| Time (UTC) | Time (EST) | Action |
-|------------|------------|--------|
-| Friday 20:00 | Friday 3 PM | Stop new trades |
-| Friday 21:30 | Friday 4:30 PM | Close existing positions |
-| Friday 22:00 | Friday 5 PM | Market closes |
+| Asset | Weekly Close | Weekly Open |
+|-------|--------------|-------------|
+| Forex (EURUSD, GBPUSD, etc.) | Saturday 02:59 AM BST | Monday 03:05 AM BST |
+| Gold (XAUUSD) | Saturday 02:58 AM BST | Monday 04:05 AM BST |
+| Metals/Indices | Saturday 02:59 AM BST | Monday 03:05 AM BST |
+
+### Timeline (Forex Example)
+
+| Time (BST) | Action |
+|------------|--------|
+| Saturday 12:59 AM | Stop new trades (2h before close) |
+| Saturday 02:29 AM | Close existing positions (30min before close) |
+| Saturday 02:59 AM | Market closes |
+| Monday 03:05 AM | Market opens |
 
 ### Configuration (.env)
 
