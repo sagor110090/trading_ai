@@ -129,10 +129,14 @@ def _parse_time_str(time_str: str) -> time:
 
 
 def _get_next_weekday(base_date: datetime, target_day: int) -> datetime:
-    """Get next occurrence of target weekday."""
+    """Get next occurrence of target weekday.
+
+    Returns today if base_date is already on target_day, otherwise returns the
+    next occurrence (adding 7 days only if we're past the target day).
+    """
     current_day = base_date.weekday()
     days_ahead = target_day - current_day
-    if days_ahead <= 0:
+    if days_ahead < 0:  # Only add 7 days if we're PAST the target day, not ON it
         days_ahead += 7
     return base_date + timedelta(days=days_ahead)
 
