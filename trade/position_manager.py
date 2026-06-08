@@ -83,7 +83,7 @@ SIGNAL_DEDUP_WINDOWS: dict[str, int] = {
 class CooldownEntry:
     """Tracks cooldown after a position closes."""
     symbol: str
-    reason: str  # "win", "loss", "timeout", "external_close", "sl_close", "tp_close", "breakeven", "reversal", "strength_exit"
+    reason: str  # "win", "loss", "timeout", "external_close", "sl_close", "tp_close", "breakeven", "reversal", "strength_exit", "weekly_close", "manual_close"
     until: datetime
 
 
@@ -625,7 +625,7 @@ class PositionManager:
     @staticmethod
     def _resolve_cooldown_minutes(trade_mode: str, reason: str) -> int:
         """Resolve cooldown duration for a given close reason."""
-        if reason in ("loss", "timeout", "external_close", "sl_close"):
+        if reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
             return COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
         if reason == "breakeven":
             return COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
@@ -635,6 +635,8 @@ class PositionManager:
             return 2
         if reason == "strength_exit":
             return COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
+        if reason == "manual_close":
+            return 5
         return 5
 
     def _cleanup_expired_close_keys(self, now: datetime) -> None:

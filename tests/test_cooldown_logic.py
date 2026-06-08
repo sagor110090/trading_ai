@@ -244,7 +244,7 @@ class CooldownLogicTests(unittest.TestCase):
     def test_resolve_cooldown_minutes_all_reasons(self) -> None:
         """Verify _resolve_cooldown_minutes returns correct durations for all reasons."""
         # Loss-tier reasons
-        for reason in ("loss", "timeout", "external_close", "sl_close"):
+        for reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
             self.assertEqual(
                 PositionManager._resolve_cooldown_minutes(TRADE_MODE, reason),
                 COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30),
@@ -273,6 +273,9 @@ class CooldownLogicTests(unittest.TestCase):
             PositionManager._resolve_cooldown_minutes(TRADE_MODE, "strength_exit"),
             30,  # COOLDOWN_AFTER_STRENGTH_EXIT["day_trading"]
         )
+
+        # Manual close — fixed 5 min
+        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "manual_close"), 5)
 
         # Unknown — default 5 min
         self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "unknown_reason"), 5)
