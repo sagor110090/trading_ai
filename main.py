@@ -77,24 +77,28 @@ def _create_client():
 
 def _authenticate_client(client) -> bool:
     """Authenticate the trading client."""
-    if SETTINGS.trading_platform == TradingPlatform.MT5:
-        success = client.connect()
-        if success:
-            console.print("[green]✓ Connected to MetaTrader 5[/]")
-            # Display account info
-            account = client.get_account_info()
-            if account:
-                console.print(f"[dim]  Balance: ${account['balance']:.2f} | Equity: ${account['equity']:.2f}[/]")
-        else:
-            console.print("[bold red]✗ Cannot connect to MetaTrader 5. Make sure MT5 terminal is running.[/]")
-        return success
-    else:
+    try:
+        if SETTINGS.trading_platform == TradingPlatform.MT5:
+            success = client.connect()
+            if success:
+                console.print("[green]✓ Connected to MetaTrader 5[/]")
+                # Display account info
+                account = client.get_account_info()
+                if account:
+                    console.print(f"[dim]  Balance: ${account['balance']:.2f} | Equity: ${account['equity']:.2f}[/]")
+            else:
+                console.print("[bold red]✗ Cannot connect to MetaTrader 5. Make sure MT5 terminal is running.[/]")
+            return success
+
         success = client.authenticate()
         if success:
             console.print("[green]✓ Authenticated with Capital.com[/]")
         else:
             console.print("[bold red]✗ Cannot authenticate with Capital.com. Check credentials.[/]")
         return success
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Authentication cancelled by user.[/]")
+        return False
 
 
 def _setup_logging() -> None:
@@ -1086,4 +1090,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Trading AI stopped by user.[/]")
