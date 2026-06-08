@@ -865,25 +865,27 @@ def _handle_trade_decision(
 
 
 def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
-    """Check verified results from this cycle and register cooldowns for losses."""
+    """Check verified results from this cycle and register cooldowns for all outcomes."""
     with get_session() as session:
-        # Find recently verified losses for this symbol
         from datetime import datetime, timedelta, timezone
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
 
-        recent_losses = (
+        recent_results = (
             session.query(SignalVerification)
             .join(Signal, SignalVerification.signal_id == Signal.id)
             .filter(
                 Signal.symbol == symbol,
-                SignalVerification.result == "LOSS",
+                SignalVerification.result.in_(["LOSS", "BREAKEVEN", "WIN"]),
                 SignalVerification.verified_at >= cutoff,
             )
             .all()
         )
 
-        for loss in recent_losses:
-            position_manager.register_verified_result(symbol, "LOSS")
+        for result in recent_results:
+            signal_id = str(result.signal_id) if result.signal_id else None
+            position_manager.register_verified_result(
+                symbol, result.result, signal_id=signal_id,
+            )
 
 
 def _check_timeouts(

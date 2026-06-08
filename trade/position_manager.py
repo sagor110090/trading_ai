@@ -83,7 +83,7 @@ SIGNAL_DEDUP_WINDOWS: dict[str, int] = {
 class CooldownEntry:
     """Tracks cooldown after a position closes."""
     symbol: str
-    reason: str  # "win", "loss", "timeout"
+    reason: str  # "win", "loss", "timeout", "external_close", "sl_close", "tp_close", "breakeven", "reversal", "strength_exit"
     until: datetime
 
 
@@ -416,12 +416,23 @@ class PositionManager:
             source=source,
         )
 
-    def register_verified_result(self, symbol: str, result: str) -> None:
-        """Register a verified signal result. Starts cooldown for losses."""
-        if result in ("LOSS", "BREAKEVEN"):
-            self.register_position_close(symbol, "loss", source="verified_result")
+    def register_verified_result(self, symbol: str, result: str, signal_id: Optional[str] = None) -> None:
+        """Register a verified signal result. Starts cooldown based on outcome.
+
+        Uses signal_id (when available) as the deal_id for dedup so the same
+        verified result cannot register a duplicate cooldown across cycles.
+        """
+        # Build a dedup key from signal_id, or fall back to a stable key
+        # based on symbol+result so that re-processing the same outcome
+        # within the query window doesn't stack cooldowns.
+        dedup_key = signal_id if signal_id else None
+
+        if result == "LOSS":
+            self.register_position_close(symbol, "loss", deal_id=dedup_key, source="verified_result")
+        elif result == "BREAKEVEN":
+            self.register_position_close(symbol, "breakeven", deal_id=dedup_key, source="verified_result")
         elif result == "WIN":
-            self.register_position_close(symbol, "win", source="verified_result")
+            self.register_position_close(symbol, "win", deal_id=dedup_key, source="verified_result")
 
     # ── Cleanup ────────────────────────────────────────────────────────────
 

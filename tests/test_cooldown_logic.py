@@ -1,3 +1,12 @@
+"""Tests for cooldown logic in position_manager.
+
+Covers:
+- Cooldown registration and expiry
+- Breakeven vs loss cooldown tiers
+- Verified result cooldowns (LOSS, BREAKEVEN, WIN)
+- Deal-ID dedup preventing duplicate cooldowns
+- _resolve_cooldown_minutes for all reason types
+"""
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -6,21 +15,21 @@ from unittest.mock import Mock, patch
 
 from config.settings import SETTINGS, Symbol, TradeMode
 from trade.executor import OpenPosition
-from trade.position_manager import PositionManager
+from trade.position_manager import (
+    COOLDOWN_AFTER_BREAKEVEN,
+    COOLDOWN_AFTER_LOSS,
+    COOLDOWN_AFTER_WIN,
+    PositionManager,
+)
 from trade.position_monitor import PositionMonitor
 from trade.tp_tracker import TPProgress
 
+# Current trade mode from config (frozen dataclass — read only)
+TRADE_MODE = SETTINGS.trade_mode.value  # e.g. "day_trading"
+
 
 class CooldownLogicTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.trade_mode_patch = patch.object(SETTINGS, "trade_mode", TradeMode.DAY_TRADING)
-        self.symbols_patch = patch.object(SETTINGS, "symbols", (Symbol.BTCUSD,))
-        self.trade_mode_patch.start()
-        self.symbols_patch.start()
-
-    def tearDown(self) -> None:
-        self.symbols_patch.stop()
-        self.trade_mode_patch.stop()
+    """Original cooldown tests + new bug-fix tests."""
 
     def test_timeout_close_starts_cooldown(self) -> None:
         manager = PositionManager(Mock())
@@ -152,6 +161,137 @@ class CooldownLogicTests(unittest.TestCase):
 
         self.assertEqual(close_reason, "tp_close")
         self.assertIn("Take profit", reason_text)
+
+    # ── Bug-fix tests ─────────────────────────────────────────────────────
+
+    def test_breakeven_uses_breakeven_cooldown_not_loss(self) -> None:
+        """BREAKEVEN should use shorter breakeven cooldown, not loss cooldown."""
+        manager = PositionManager(Mock())
+
+        entry = manager.register_position_close(
+            symbol="BTCUSD",
+            reason="breakeven",
+            deal_id="be-1",
+            source="unit_test",
+        )
+
+        # The breakeven cooldown should be shorter than the loss cooldown
+        expected_be = COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15)
+        expected_loss = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+
+        self.assertGreater(remaining, 0.0)
+        self.assertLessEqual(remaining, expected_be + 0.5,
+                             f"Breakeven cooldown ({remaining:.1f} min) should be ≤ {expected_be} min, "
+                             f"not the loss cooldown of {expected_loss} min")
+
+    def test_verified_result_breakeven_uses_breakeven_tier(self) -> None:
+        """register_verified_result with BREAKEVEN should use breakeven tier, not loss."""
+        manager = PositionManager(Mock())
+
+        manager.register_verified_result("BTCUSD", "BREAKEVEN", signal_id="sig-be-1")
+
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+        expected_be = COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15)
+        expected_loss = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+
+        self.assertGreater(remaining, 0.0)
+        self.assertLessEqual(remaining, expected_be + 0.5,
+                             f"BREAKEVEN verified result cooldown ({remaining:.1f} min) "
+                             f"should use breakeven tier ({expected_be} min), not loss tier ({expected_loss} min)")
+
+    def test_verified_result_win_registers_cooldown(self) -> None:
+        """WIN verified results should register a win cooldown."""
+        manager = PositionManager(Mock())
+
+        manager.register_verified_result("BTCUSD", "WIN", signal_id="sig-win-1")
+
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+        expected = COOLDOWN_AFTER_WIN.get(TRADE_MODE, 10)
+
+        self.assertGreater(remaining, 0.0)
+        self.assertLessEqual(remaining, expected + 0.5,
+                             f"WIN verified result cooldown ({remaining:.1f} min) "
+                             f"should be ≤ {expected} min")
+
+    def test_verified_result_dedup_prevents_duplicate_cooldown(self) -> None:
+        """Passing the same signal_id twice should not create duplicate cooldowns."""
+        manager = PositionManager(Mock())
+
+        # First registration
+        manager.register_verified_result("BTCUSD", "LOSS", signal_id="sig-dedup-1")
+        remaining1 = manager.get_cooldown_remaining_minutes("BTCUSD")
+        self.assertGreater(remaining1, 0.0)
+
+        # Second registration with same signal_id — should be deduped
+        manager.register_verified_result("BTCUSD", "LOSS", signal_id="sig-dedup-1")
+
+        # Count cooldowns for BTCUSD — should be exactly 1
+        canonical = manager.canonicalize_symbol("BTCUSD")
+        btc_cooldowns = [cd for cd in manager.cooldowns if cd.symbol == canonical]
+        self.assertEqual(len(btc_cooldowns), 1,
+                         f"Expected 1 cooldown after dedup, got {len(btc_cooldowns)}")
+
+    def test_verified_result_without_signal_id_still_works(self) -> None:
+        """register_verified_result should still work when signal_id is None."""
+        manager = PositionManager(Mock())
+
+        manager.register_verified_result("BTCUSD", "LOSS")
+        self.assertTrue(manager.is_active("BTCUSD"))
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+        self.assertGreater(remaining, 0.0)
+
+    def test_resolve_cooldown_minutes_all_reasons(self) -> None:
+        """Verify _resolve_cooldown_minutes returns correct durations for all reasons."""
+        # Loss-tier reasons
+        for reason in ("loss", "timeout", "external_close", "sl_close"):
+            self.assertEqual(
+                PositionManager._resolve_cooldown_minutes(TRADE_MODE, reason),
+                COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30),
+                f"Reason '{reason}' should use LOSS cooldown tier",
+            )
+
+        # Breakeven
+        self.assertEqual(
+            PositionManager._resolve_cooldown_minutes(TRADE_MODE, "breakeven"),
+            COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15),
+        )
+
+        # Win-tier reasons
+        for reason in ("win", "tp_close"):
+            self.assertEqual(
+                PositionManager._resolve_cooldown_minutes(TRADE_MODE, reason),
+                COOLDOWN_AFTER_WIN.get(TRADE_MODE, 10),
+                f"Reason '{reason}' should use WIN cooldown tier",
+            )
+
+        # Reversal — fixed 2 min
+        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "reversal"), 2)
+
+        # Strength exit
+        self.assertEqual(
+            PositionManager._resolve_cooldown_minutes(TRADE_MODE, "strength_exit"),
+            30,  # COOLDOWN_AFTER_STRENGTH_EXIT["day_trading"]
+        )
+
+        # Unknown — default 5 min
+        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "unknown_reason"), 5)
+
+    def test_breakeven_cooldown_shorter_than_loss(self) -> None:
+        """Breakeven cooldown must always be shorter than loss cooldown across all modes."""
+        for mode in ("scalping", "day_trading", "swing"):
+            be = COOLDOWN_AFTER_BREAKEVEN.get(mode, 15)
+            loss = COOLDOWN_AFTER_LOSS.get(mode, 30)
+            self.assertLessEqual(be, loss,
+                                 f"Breakeven ({be} min) should be ≤ loss ({loss} min) for {mode}")
+
+    def test_win_cooldown_shorter_than_loss(self) -> None:
+        """Win cooldown must always be shorter than loss cooldown across all modes."""
+        for mode in ("scalping", "day_trading", "swing"):
+            win = COOLDOWN_AFTER_WIN.get(mode, 10)
+            loss = COOLDOWN_AFTER_LOSS.get(mode, 30)
+            self.assertLessEqual(win, loss,
+                                 f"Win ({win} min) should be ≤ loss ({loss} min) for {mode}")
 
 
 if __name__ == "__main__":
