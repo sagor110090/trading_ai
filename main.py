@@ -865,7 +865,19 @@ def _handle_trade_decision(
 
 
 def _register_verified_results(symbol: str, position_manager: PositionManager) -> None:
-    """Check verified results from this cycle and register cooldowns for all outcomes."""
+    """Check verified results from this cycle and register cooldowns for all outcomes.
+
+    Skips symbols that already have an active cooldown (e.g. from an external_close
+    or timeout that already registered one), preventing triple-stacking.
+    Also deduplicates signals verified in the same cycle so only one cooldown
+    per outcome-type is registered.
+    """
+    # If a cooldown is already active for this symbol, skip entirely —
+    # the position close already registered one (external_close, sl_close, etc.)
+    if position_manager.is_active(symbol):
+        logger.info("%s: cooldown already active, skipping verified result cooldown", symbol)
+        return
+
     with get_session() as session:
         from datetime import datetime, timedelta, timezone
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -881,7 +893,18 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
             .all()
         )
 
+        # Deduplicate: only register one cooldown per outcome type
+        # (multiple signals for the same symbol can have the same result)
+        seen_outcomes: set[str] = set()
         for result in recent_results:
+            if result.result in seen_outcomes:
+                logger.debug(
+                    "%s: skipping duplicate verified %s cooldown (already registered)",
+                    symbol, result.result,
+                )
+                continue
+            seen_outcomes.add(result.result)
+
             signal_id = str(result.signal_id) if result.signal_id else None
             position_manager.register_verified_result(
                 symbol, result.result, signal_id=signal_id,
