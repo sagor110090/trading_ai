@@ -243,42 +243,44 @@ class CooldownLogicTests(unittest.TestCase):
 
     def test_resolve_cooldown_minutes_all_reasons(self) -> None:
         """Verify _resolve_cooldown_minutes returns correct durations for all reasons."""
+        manager = PositionManager(Mock())
+
         # Loss-tier reasons
         for reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
             self.assertEqual(
-                PositionManager._resolve_cooldown_minutes(TRADE_MODE, reason),
+                manager._resolve_cooldown_minutes(TRADE_MODE, reason, "BTCUSD"),
                 COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30),
                 f"Reason '{reason}' should use LOSS cooldown tier",
             )
 
         # Breakeven
         self.assertEqual(
-            PositionManager._resolve_cooldown_minutes(TRADE_MODE, "breakeven"),
+            manager._resolve_cooldown_minutes(TRADE_MODE, "breakeven", "BTCUSD"),
             COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15),
         )
 
         # Win-tier reasons
         for reason in ("win", "tp_close"):
             self.assertEqual(
-                PositionManager._resolve_cooldown_minutes(TRADE_MODE, reason),
+                manager._resolve_cooldown_minutes(TRADE_MODE, reason, "BTCUSD"),
                 COOLDOWN_AFTER_WIN.get(TRADE_MODE, 10),
                 f"Reason '{reason}' should use WIN cooldown tier",
             )
 
         # Reversal — fixed 2 min
-        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "reversal"), 2)
+        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "reversal", "BTCUSD"), 2)
 
         # Strength exit
         self.assertEqual(
-            PositionManager._resolve_cooldown_minutes(TRADE_MODE, "strength_exit"),
+            manager._resolve_cooldown_minutes(TRADE_MODE, "strength_exit", "BTCUSD"),
             30,  # COOLDOWN_AFTER_STRENGTH_EXIT["day_trading"]
         )
 
         # Manual close — fixed 5 min
-        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "manual_close"), 5)
+        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "manual_close", "BTCUSD"), 5)
 
         # Unknown — default 5 min
-        self.assertEqual(PositionManager._resolve_cooldown_minutes(TRADE_MODE, "unknown_reason"), 5)
+        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "unknown_reason", "BTCUSD"), 5)
 
     def test_breakeven_cooldown_shorter_than_loss(self) -> None:
         """Breakeven cooldown must always be shorter than loss cooldown across all modes."""
@@ -295,6 +297,125 @@ class CooldownLogicTests(unittest.TestCase):
             loss = COOLDOWN_AFTER_LOSS.get(mode, 30)
             self.assertLessEqual(win, loss,
                                  f"Win ({win} min) should be ≤ loss ({loss} min) for {mode}")
+
+    # ── Fast market cooldown tests ────────────────────────────────────────
+
+    def test_fast_market_doubles_cooldown(self) -> None:
+        """When ATR ratio >= threshold, cooldowns should be multiplied by the configured multiplier."""
+        manager = PositionManager(Mock())
+
+        # Set ATR ratio above threshold (default 1.5)
+        manager.update_atr_ratio("BTCUSD", 1.8)
+
+        # Register a loss cooldown — should be extended
+        entry = manager.register_position_close(
+            symbol="BTCUSD",
+            reason="loss",
+            deal_id="fast-market-1",
+            source="unit_test",
+        )
+
+        # Default trade mode is swing, so loss cooldown is 60 min
+        # With 2x multiplier, it should be 120 min
+        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected_extended = int(expected_base * SETTINGS.fast_market.cooldown_multiplier)
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+
+        self.assertGreaterEqual(remaining, expected_extended - 1.0,
+                                 f"Fast market cooldown ({remaining:.1f} min) should be ~{expected_extended} min "
+                                 f"(base {expected_base} x {SETTINGS.fast_market.cooldown_multiplier})")
+        self.assertEqual(entry.fast_market_multiplier, SETTINGS.fast_market.cooldown_multiplier)
+
+    def test_normal_market_no_extension(self) -> None:
+        """When ATR ratio is below threshold, cooldowns should NOT be extended."""
+        manager = PositionManager(Mock())
+
+        # Set ATR ratio below threshold
+        manager.update_atr_ratio("BTCUSD", 1.1)
+
+        entry = manager.register_position_close(
+            symbol="BTCUSD",
+            reason="loss",
+            deal_id="normal-market-1",
+            source="unit_test",
+        )
+
+        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
+
+        # Should be the base cooldown, not extended
+        self.assertLessEqual(remaining, expected_base + 1.0,
+                             f"Normal market cooldown ({remaining:.1f} min) should be {expected_base} min")
+        self.assertEqual(entry.fast_market_multiplier, 1.0)
+
+    def test_no_atr_ratio_defaults_to_normal(self) -> None:
+        """When no ATR ratio is cached for a symbol, cooldowns should use base duration."""
+        manager = PositionManager(Mock())
+
+        # Don't call update_atr_ratio at all — should default to 1.0 multiplier
+        entry = manager.register_position_close(
+            symbol="ETHUSD",
+            reason="loss",
+            deal_id="no-atr-1",
+            source="unit_test",
+        )
+
+        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        remaining = manager.get_cooldown_remaining_minutes("ETHUSD")
+
+        self.assertLessEqual(remaining, expected_base + 1.0,
+                             f"No-ATR cooldown ({remaining:.1f} min) should be base {expected_base} min")
+        self.assertEqual(entry.fast_market_multiplier, 1.0)
+
+    def test_fast_market_multiplier_varies_by_reason(self) -> None:
+        """Fast market multiplier should apply to all cooldown reasons."""
+        manager = PositionManager(Mock())
+        manager.update_atr_ratio("BTCUSD", 2.0)  # Well above threshold
+
+        multiplier = SETTINGS.fast_market.cooldown_multiplier
+
+        # Test a few different reasons
+        for reason in ("loss", "breakeven", "win"):
+            # Clean up cooldowns between iterations
+            manager.cooldowns.clear()
+            manager._closed_position_keys.clear()
+
+            entry = manager.register_position_close(
+                symbol="BTCUSD",
+                reason=reason,
+                deal_id=f"fast-{reason}-1",
+                source="unit_test",
+            )
+            self.assertEqual(entry.fast_market_multiplier, multiplier,
+                             f"Reason '{reason}' should have fast market multiplier {multiplier}")
+
+    def test_atr_threshold_boundary(self) -> None:
+        """ATR ratio exactly at threshold should trigger fast market multiplier."""
+        manager = PositionManager(Mock())
+
+        # Exactly at threshold (default 1.5)
+        manager.update_atr_ratio("BTCUSD", SETTINGS.fast_market.atr_threshold)
+
+        entry = manager.register_position_close(
+            symbol="BTCUSD",
+            reason="loss",
+            deal_id="boundary-1",
+            source="unit_test",
+        )
+        self.assertEqual(entry.fast_market_multiplier, SETTINGS.fast_market.cooldown_multiplier)
+
+        # Just below threshold
+        manager.update_atr_ratio("BTCUSD", SETTINGS.fast_market.atr_threshold - 0.01)
+        manager.cooldowns.clear()
+        manager._closed_position_keys.clear()
+
+        entry = manager.register_position_close(
+            symbol="BTCUSD",
+            reason="loss",
+            deal_id="boundary-2",
+            source="unit_test",
+        )
+        self.assertEqual(entry.fast_market_multiplier, 1.0)
 
 
 if __name__ == "__main__":

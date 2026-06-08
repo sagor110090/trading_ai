@@ -535,6 +535,23 @@ def run_signal_cycle(
 
         display_candle_fetch(candle_results, loaded_counts)
 
+        # ── 1.5. Update fast market ATR ratio ───────────────────────────────
+        # Compute current ATR / average ATR from M5 candles to detect fast markets.
+        # When ATR is elevated, cooldowns are extended to reduce overtrading.
+        df_m5_raw = fetched.get(Timeframe.M5.value, pd.DataFrame())
+        if not df_m5_raw.empty:
+            try:
+                df_m5_feat = compute_all_features(df_m5_raw.copy())
+                atr_col = df_m5_feat["atr14"].dropna()
+                if len(atr_col) >= 10:
+                    current_atr = atr_col.iloc[-1]
+                    avg_atr = atr_col.tail(20).mean()
+                    if avg_atr > 0:
+                        atr_ratio = current_atr / avg_atr
+                        position_manager.update_atr_ratio(symbol.value, atr_ratio)
+            except Exception as e:
+                logger.debug("Could not compute ATR ratio for %s: %s", symbol.value, e)
+
         # ── 2. Verify pending signals ────────────────────────────────────
         verified = verify_pending_signals(symbol.value)
         with get_session() as session:

@@ -85,6 +85,7 @@ class CooldownEntry:
     symbol: str
     reason: str  # "win", "loss", "timeout", "external_close", "sl_close", "tp_close", "breakeven", "reversal", "strength_exit", "weekly_close", "manual_close"
     until: datetime
+    fast_market_multiplier: float = 1.0  # 2.0 if cooldown was extended due to fast market
 
 
 @dataclass
@@ -114,6 +115,7 @@ class PositionManager:
         self.cooldowns: list[CooldownEntry] = []
         self._broker_positions: list[OpenPosition] = []
         self._closed_position_keys: dict[str, datetime] = {}
+        self._atr_ratios: dict[str, float] = {}  # symbol -> current ATR ratio (current/avg)
         self._lock = threading.RLock()
 
     # ── Sync with broker ──────────────────────────────────────────────────
@@ -122,6 +124,42 @@ class PositionManager:
         """Fetch open positions from the trading platform."""
         self._broker_positions = get_open_positions_unified(self.client)
         return self._broker_positions
+
+    # ── Fast market detection ──────────────────────────────────────────────
+
+    def update_atr_ratio(self, symbol: str, atr_ratio: float) -> None:
+        """Update the cached ATR ratio for a symbol.
+
+        Called each signal cycle with the current ATR ratio (current ATR / avg ATR).
+        Used to extend cooldowns during fast (high volatility) markets.
+
+        Args:
+            symbol: The trading symbol (e.g., "BTCUSD")
+            atr_ratio: Current ATR divided by average ATR. >= 1.5 means fast market.
+        """
+        canonical = self.canonicalize_symbol(symbol)
+        self._atr_ratios[canonical] = atr_ratio
+        if atr_ratio >= SETTINGS.fast_market.atr_threshold:
+            logger.info(
+                "%s: fast market detected (ATR ratio %.2f >= %.2f), cooldowns will be extended",
+                canonical, atr_ratio, SETTINGS.fast_market.atr_threshold,
+            )
+
+    def get_fast_market_multiplier(self, symbol: str) -> float:
+        """Return the cooldown multiplier based on current market speed.
+
+        Returns SETTINGS.fast_market.cooldown_multiplier (e.g. 2.0) if the
+        market is fast (ATR ratio >= threshold), otherwise 1.0 (no change).
+
+        Falls back to 1.0 if no ATR ratio has been cached for this symbol.
+        """
+        canonical = self.canonicalize_symbol(symbol)
+        atr_ratio = self._atr_ratios.get(canonical)
+        if atr_ratio is None:
+            return 1.0
+        if atr_ratio >= SETTINGS.fast_market.atr_threshold:
+            return SETTINGS.fast_market.cooldown_multiplier
+        return 1.0
 
     # ── Signal dedup ──────────────────────────────────────────────────────
 
@@ -352,7 +390,8 @@ class PositionManager:
                     until=now,
                 )
 
-            cooldown_minutes = self._resolve_cooldown_minutes(trade_mode, reason)
+            cooldown_minutes = self._resolve_cooldown_minutes(trade_mode, reason, canonical_symbol)
+            fast_market_mult = self.get_fast_market_multiplier(canonical_symbol)
             until = now + timedelta(minutes=cooldown_minutes)
 
             # Keep the longest active cooldown for the symbol to avoid stacking
@@ -374,6 +413,7 @@ class PositionManager:
                 symbol=canonical_symbol,
                 reason=reason,
                 until=until,
+                fast_market_multiplier=fast_market_mult,
             )
             self.cooldowns.append(entry)
             if close_key:
@@ -387,6 +427,11 @@ class PositionManager:
             source,
         )
         logger.info("Close reason: %s %s", canonical_symbol, reason)
+        if fast_market_mult > 1.0:
+            logger.info(
+                "Fast market: %s — cooldown extended %.1fx (ATR ratio elevated)",
+                canonical_symbol, fast_market_mult,
+            )
         logger.info(
             "Cooldown started: %s — %d min after %s (expires %s UTC)",
             canonical_symbol,
@@ -622,22 +667,35 @@ class PositionManager:
         """Compare broker symbols and strategy symbols using the canonical key."""
         return self.canonicalize_symbol(position_symbol) == self.canonicalize_symbol(requested_symbol)
 
-    @staticmethod
-    def _resolve_cooldown_minutes(trade_mode: str, reason: str) -> int:
-        """Resolve cooldown duration for a given close reason."""
+    def _resolve_cooldown_minutes(self, trade_mode: str, reason: str, symbol: str = "") -> int:
+        """Resolve cooldown duration for a given close reason.
+
+        When the market is fast (ATR ratio >= threshold), cooldowns are
+        multiplied by the fast market multiplier (e.g. 2x).
+        """
         if reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
-            return COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
-        if reason == "breakeven":
-            return COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
-        if reason in ("win", "tp_close"):
-            return COOLDOWN_AFTER_WIN.get(trade_mode, 10)
-        if reason == "reversal":
-            return 2
-        if reason == "strength_exit":
-            return COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
-        if reason == "manual_close":
-            return 5
-        return 5
+            base = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
+        elif reason == "breakeven":
+            base = COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
+        elif reason in ("win", "tp_close"):
+            base = COOLDOWN_AFTER_WIN.get(trade_mode, 10)
+        elif reason == "reversal":
+            base = 2
+        elif reason == "strength_exit":
+            base = COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
+        elif reason == "manual_close":
+            base = 5
+        else:
+            base = 5
+
+        # Apply fast market multiplier if ATR ratio indicates high volatility
+        multiplier = self.get_fast_market_multiplier(symbol) if symbol else 1.0
+        if multiplier > 1.0:
+            logger.info(
+                "Fast market multiplier %.1fx applied to %s cooldown (%d min -> %d min)",
+                multiplier, reason, base, int(base * multiplier),
+            )
+        return int(base * multiplier)
 
     def _cleanup_expired_close_keys(self, now: datetime) -> None:
         """Drop dedupe keys after their associated cooldown has expired."""

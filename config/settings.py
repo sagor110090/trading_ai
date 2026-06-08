@@ -82,6 +82,24 @@ class TradingPlatform(str, Enum):
 
 
 @dataclass(frozen=True)
+class FastMarketConfig:
+    """Configuration for fast market cooldown extension.
+
+    When ATR (Average True Range) exceeds a threshold relative to its average,
+    the market is considered 'fast' (high volatility). In fast markets, cooldowns
+    are multiplied to reduce overtrading during chaotic conditions.
+
+    ATR ratio = current ATR / average ATR over the lookback window.
+    """
+    # ATR ratio threshold above which the market is considered "fast"
+    # 1.5 = current ATR is 50% above its recent average
+    atr_threshold: float = 1.5
+    # Multiplier applied to cooldowns when market is fast
+    # 2.0 = cooldowns last twice as long
+    cooldown_multiplier: float = 2.0
+
+
+@dataclass(frozen=True)
 class CapitalComConfig:
     api_key: str = ""
     identifier: str = ""
@@ -292,6 +310,7 @@ class Settings:
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
     weekly_close: WeeklyCloseConfig = field(default_factory=WeeklyCloseConfig)
+    fast_market: FastMarketConfig = field(default_factory=FastMarketConfig)
     # Max positions per correlation group (prevents overexposure)
     max_positions_per_group: dict = field(default_factory=lambda: {
         "CRYPTO": 1,
@@ -485,6 +504,10 @@ def load_settings() -> Settings:
     # Verification settings
     dynamic_lookahead = os.getenv("DYNAMIC_LOOKAHEAD", "true").lower() == "true"
 
+    # Fast market cooldown settings
+    fast_market_atr_threshold = float(os.getenv("FAST_MARKET_ATR_THRESHOLD", "1.5"))
+    fast_market_cooldown_multiplier = float(os.getenv("FAST_MARKET_COOLDOWN_MULTIPLIER", "2.0"))
+
     # Correlation limit settings
     max_positions_per_group = {
         "CRYPTO": int(os.getenv("MAX_POSITIONS_CRYPTO", "1")),
@@ -523,6 +546,10 @@ def load_settings() -> Settings:
             close_positions_hours=weekly_close_close_positions,
         ),
         verification=VerificationConfig(dynamic_lookahead=dynamic_lookahead),
+        fast_market=FastMarketConfig(
+            atr_threshold=fast_market_atr_threshold,
+            cooldown_multiplier=fast_market_cooldown_multiplier,
+        ),
         max_positions_per_group=max_positions_per_group,
         trade_mode=trade_mode,
         auto_trade=auto_trade,
