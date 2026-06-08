@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import SETTINGS
@@ -87,6 +87,24 @@ def get_raw_session() -> Session:
 def create_tables() -> None:
     engine = get_engine()
     Base.metadata.create_all(engine)
+
+    # Auto-migrate: add columns that may not exist in older databases.
+    # SQLite doesn't support ALTER TABLE ADD COLUMN in create_all(),
+    # so we add them manually with existence checks.
+    _migrations = [
+        ("trade_log", "original_stop_loss", "FLOAT"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in _migrations:
+            try:
+                existing = {col["name"] for col in inspect(engine).get_columns(table)}
+            except Exception:
+                existing = set()
+            if column not in existing:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                conn.commit()
+                logger.info("Migration: added column %s.%s", table, column)
+
     logger.info("Database tables created/verified")
 
 
