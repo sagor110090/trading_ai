@@ -27,6 +27,7 @@ class TPProgress:
     take_profit: float
     size: float
     opened_at: datetime
+    original_stop_loss: float = 0.0  # Preserved initial SL (never overwritten by trailing)
 
     # Tracking fields
     highest_tp_progress: float = 0.0  # 0.0 to 1.0+
@@ -215,7 +216,8 @@ class TPProgress:
             "direction": self.direction,
             "entry": self.entry_price,
             "exit": exit_price,
-            "sl": self.stop_loss,
+            "sl": self.original_stop_loss,  # Use ORIGINAL SL, not trailing-adjusted
+            "original_sl": self.original_stop_loss,  # Explicit original SL for TradeLog
             "tp": self.take_profit,
             "size": self.size,
             "pnl": self.final_pnl,
@@ -263,6 +265,7 @@ class TPProgressTracker:
             take_profit=take_profit,
             size=size,
             opened_at=opened_at,
+            original_stop_loss=stop_loss,  # Preserve the initial SL
         )
 
         key = deal_id if deal_id else f"{symbol}_{direction}"

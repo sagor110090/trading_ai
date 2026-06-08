@@ -178,7 +178,8 @@ class TradeLog(Base):
     # Entry and exit
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_loss: Mapped[float] = mapped_column(Float, nullable=False)  # Current SL (may be trailing-adjusted)
+    original_stop_loss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Initial SL before trailing
     take_profit: Mapped[float] = mapped_column(Float, nullable=False)
 
     # Timestamps

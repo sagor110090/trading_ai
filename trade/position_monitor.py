@@ -93,19 +93,28 @@ class PositionMonitor:
 
             # Add new position to tracker (normalize symbol for DB consistency)
             normalized_symbol = normalize_symbol(pos.epic)
+            # If broker doesn't provide SL/TP, use a safe fallback based on
+            # a percentage of entry price instead of entry itself (which gives zero protection).
+            sl = pos.stop_level if pos.stop_level else pos.level * 0.98  # 2% below entry
+            tp = pos.profit_level if pos.profit_level else pos.level * 1.02  # 2% above entry
             self.tp_tracker.add_position(
                 symbol=normalized_symbol,
                 direction=pos.direction,
                 entry_price=pos.level,
-                stop_loss=pos.stop_level if pos.stop_level else pos.level,
-                take_profit=pos.profit_level if pos.profit_level else pos.level * 1.01,
+                stop_loss=sl,
+                take_profit=tp,
                 size=pos.size,
                 opened_at=datetime.now(timezone.utc),
                 deal_id=key,
             )
+            if not pos.stop_level:
+                logger.warning(
+                    "Position %s %s has no stop_level from broker — using 2%% fallback SL=%.2f",
+                    pos.direction, pos.epic, sl,
+                )
             logger.info(
                 "Started tracking: %s %s entry=%.2f SL=%.2f TP=%.2f (deal_id=%s)",
-                pos.direction, pos.epic, pos.level, pos.stop_level, pos.profit_level, key,
+                pos.direction, pos.epic, pos.level, sl, tp, key,
             )
 
         # Remove positions that are no longer open (TP hit, SL hit, closed externally)
@@ -582,11 +591,16 @@ class PositionMonitor:
         )
 
     def _classify_external_close(self, tracker: TPProgress) -> tuple[str, str]:
-        """Classify an externally closed position using only observed tracker evidence."""
+        """Classify an externally closed position using only observed tracker evidence.
+
+        Uses original_stop_loss (the initial SL before trailing adjustments) so that
+        a breakeven trailing stop doesn't cause SL hits to be misclassified.
+        """
         if tracker.highest_tp_progress >= 1.0:
             return "tp_close", "Take profit hit at broker"
 
-        stop_loss = tracker.stop_loss
+        # Use original SL for classification, not the trailing-adjusted one
+        stop_loss = tracker.original_stop_loss if tracker.original_stop_loss else tracker.stop_loss
         if stop_loss and stop_loss != tracker.entry_price and tracker.mae_price:
             if tracker.direction.upper() == "BUY" and tracker.mae_price <= stop_loss:
                 return "sl_close", "Stop loss hit at broker"
@@ -614,6 +628,7 @@ class PositionMonitor:
                 entry_price=stats["entry"],
                 exit_price=stats.get("exit"),
                 stop_loss=stats["sl"],
+                original_stop_loss=stats.get("original_sl"),
                 take_profit=stats["tp"],
                 opened_at=datetime.fromisoformat(stats["opened_at"]),
                 closed_at=datetime.fromisoformat(stats["closed_at"]) if stats.get("closed_at") else None,
