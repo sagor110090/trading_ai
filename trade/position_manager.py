@@ -365,8 +365,18 @@ class PositionManager:
         reason: str,
         deal_id: Optional[str] = None,
         source: str = "unknown",
-    ) -> CooldownEntry:
-        """Register a confirmed position close and start the symbol cooldown."""
+        closed_at: Optional[datetime] = None,
+    ) -> Optional[CooldownEntry]:
+        """Register a confirmed position close and start the symbol cooldown.
+
+        Args:
+            closed_at: The actual time the trade closed. When provided, the
+                cooldown expiry is anchored to this time instead of ``now``.
+                If the calculated expiry is already in the past, no cooldown
+                is registered (it would have already expired). This prevents
+                verified results from re-registering stale cooldowns long
+                after the original close.
+        """
         canonical_symbol = self.canonicalize_symbol(symbol)
         trade_mode = SETTINGS.trade_mode.value
         now = datetime.now(timezone.utc)
@@ -392,7 +402,26 @@ class PositionManager:
 
             cooldown_minutes = self._resolve_cooldown_minutes(trade_mode, reason, canonical_symbol)
             fast_market_mult = self.get_fast_market_multiplier(canonical_symbol)
-            until = now + timedelta(minutes=cooldown_minutes)
+            cooldown_start = closed_at if closed_at else now
+            until = cooldown_start + timedelta(minutes=cooldown_minutes)
+
+            # If the cooldown would have already expired by now, skip
+            # registration entirely. This happens when a verified result
+            # arrives late — the trade closed long enough ago that even
+            # the full cooldown period has already passed.
+            if until <= now:
+                logger.info(
+                    "Cooldown already expired: symbol=%s reason=%s source=%s "
+                    "(closed_at=%s, cooldown=%d min, would expire %s — now is %s)",
+                    canonical_symbol,
+                    reason,
+                    source,
+                    cooldown_start.strftime("%H:%M:%S") if cooldown_start else "n/a",
+                    cooldown_minutes,
+                    until.strftime("%H:%M:%S"),
+                    now.strftime("%H:%M:%S"),
+                )
+                return None
 
             # Keep the longest active cooldown for the symbol to avoid stacking
             # duplicate entries from competing close paths.
@@ -452,20 +481,33 @@ class PositionManager:
         reason: str,
         deal_id: Optional[str] = None,
         source: str = "legacy",
-    ) -> CooldownEntry:
+        closed_at: Optional[datetime] = None,
+    ) -> Optional[CooldownEntry]:
         """Backward-compatible alias for close registration."""
         return self.register_position_close(
             symbol=symbol,
             reason=reason,
             deal_id=deal_id,
             source=source,
+            closed_at=closed_at,
         )
 
-    def register_verified_result(self, symbol: str, result: str, signal_id: Optional[str] = None) -> None:
+    def register_verified_result(
+        self,
+        symbol: str,
+        result: str,
+        signal_id: Optional[str] = None,
+        closed_at: Optional[datetime] = None,
+    ) -> None:
         """Register a verified signal result. Starts cooldown based on outcome.
 
         Uses signal_id (when available) as the deal_id for dedup so the same
         verified result cannot register a duplicate cooldown across cycles.
+
+        Args:
+            closed_at: The actual trade close time. When provided, the cooldown
+                expiry is anchored to this time. If the cooldown would already
+                have expired by now, no cooldown is registered.
         """
         # Build a dedup key from signal_id, or fall back to a stable key
         # based on symbol+result so that re-processing the same outcome
@@ -473,11 +515,11 @@ class PositionManager:
         dedup_key = signal_id if signal_id else None
 
         if result == "LOSS":
-            self.register_position_close(symbol, "loss", deal_id=dedup_key, source="verified_result")
+            self.register_position_close(symbol, "loss", deal_id=dedup_key, source="verified_result", closed_at=closed_at)
         elif result == "BREAKEVEN":
-            self.register_position_close(symbol, "breakeven", deal_id=dedup_key, source="verified_result")
+            self.register_position_close(symbol, "breakeven", deal_id=dedup_key, source="verified_result", closed_at=closed_at)
         elif result == "WIN":
-            self.register_position_close(symbol, "win", deal_id=dedup_key, source="verified_result")
+            self.register_position_close(symbol, "win", deal_id=dedup_key, source="verified_result", closed_at=closed_at)
 
     # ── Cleanup ────────────────────────────────────────────────────────────
 

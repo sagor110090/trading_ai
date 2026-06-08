@@ -888,6 +888,11 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
     or timeout that already registered one), preventing triple-stacking.
     Also deduplicates signals verified in the same cycle so only one cooldown
     per outcome-type is registered.
+
+    Uses the trade's actual ``closed_at`` timestamp from TradeLog so that
+    cooldown expiry is anchored to when the trade truly closed — not to when
+    the verification result arrived. This prevents late-arriving verified
+    results from re-registering cooldowns that have already expired.
     """
     # If a cooldown is already active for this symbol, skip entirely —
     # the position close already registered one (external_close, sl_close, etc.)
@@ -910,6 +915,22 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
             .all()
         )
 
+        # Look up the most recent trade close time for this symbol so the
+        # cooldown is anchored to the actual trade close, not the verification time.
+        from data.models import TradeLog
+        latest_close = (
+            session.query(TradeLog.closed_at)
+            .filter(
+                TradeLog.symbol == symbol,
+                TradeLog.closed_at.isnot(None),
+            )
+            .order_by(TradeLog.closed_at.desc())
+            .first()
+        )
+        trade_closed_at = latest_close[0] if latest_close else None
+        if trade_closed_at and trade_closed_at.tzinfo is None:
+            trade_closed_at = trade_closed_at.replace(tzinfo=timezone.utc)
+
         # Deduplicate: only register one cooldown per outcome type
         # (multiple signals for the same symbol can have the same result)
         seen_outcomes: set[str] = set()
@@ -925,6 +946,7 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
             signal_id = str(result.signal_id) if result.signal_id else None
             position_manager.register_verified_result(
                 symbol, result.result, signal_id=signal_id,
+                closed_at=trade_closed_at,
             )
 
 

@@ -417,6 +417,87 @@ class CooldownLogicTests(unittest.TestCase):
         )
         self.assertEqual(entry.fast_market_multiplier, 1.0)
 
+    # ── Late verified result cooldown fix ────────────────────────────────────
+
+    def test_verified_result_with_closed_at_skips_expired_cooldown(self) -> None:
+        """A verified result with closed_at in the past should NOT register a
+        new cooldown if the cooldown would have already expired by now.
+
+        This is the core fix for the bug where verified results arriving late
+        (after the original cooldown expired) would re-register a fresh cooldown
+        from `now`, extending the cooldown far beyond its intended expiry.
+        """
+        manager = PositionManager(Mock())
+
+        # Simulate a trade that closed 60 minutes ago
+        closed_at = datetime.now(timezone.utc) - timedelta(minutes=60)
+
+        # LOSS cooldown for day_trading is 30 min — would have expired 30 min ago
+        manager.register_verified_result("XAUUSD", "LOSS", signal_id="sig-late-1", closed_at=closed_at)
+
+        # No cooldown should be active — it would have already expired
+        self.assertFalse(manager.is_active("XAUUSD"),
+                         "Late verified result should NOT register a cooldown that already expired")
+        self.assertEqual(manager.get_cooldown_remaining_minutes("XAUUSD"), 0.0)
+
+    def test_verified_result_with_recent_closed_at_registers_cooldown(self) -> None:
+        """A verified result with a recent closed_at (cooldown not yet expired)
+        should register a cooldown anchored to the actual close time.
+        """
+        manager = PositionManager(Mock())
+
+        # Simulate a trade that closed 5 minutes ago
+        closed_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+        # LOSS cooldown for day_trading is 30 min — should expire in 25 min
+        manager.register_verified_result("XAUUSD", "LOSS", signal_id="sig-recent-1", closed_at=closed_at)
+
+        self.assertTrue(manager.is_active("XAUUSD"))
+        remaining = manager.get_cooldown_remaining_minutes("XAUUSD")
+        expected = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30) - 5  # 30 min - 5 min already passed
+        # Allow 1 min tolerance for test execution time
+        self.assertAlmostEqual(remaining, expected, delta=1.0,
+                               msg=f"Expected ~{expected:.0f} min remaining, got {remaining:.1f}")
+
+    def test_verified_result_without_closed_at_uses_now(self) -> None:
+        """Backward compatibility: verified results without closed_at use `now`
+        as the cooldown start (original behavior).
+        """
+        manager = PositionManager(Mock())
+
+        manager.register_verified_result("XAUUSD", "LOSS", signal_id="sig-no-closed-at")
+
+        self.assertTrue(manager.is_active("XAUUSD"))
+        remaining = manager.get_cooldown_remaining_minutes("XAUUSD")
+        expected = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        self.assertAlmostEqual(remaining, expected, delta=1.0)
+
+    def test_no_double_cooldown_from_verified_after_original_expires(self) -> None:
+        """End-to-end reproduction of the original bug:
+
+        1. Position close registers a cooldown (e.g., 10 min for WIN)
+        2. Original cooldown expires
+        3. Verified result arrives and should NOT register a new cooldown
+           because closed_at proves the trade closed long ago.
+        """
+        manager = PositionManager(Mock())
+
+        # Step 1: Original close registers a cooldown
+        closed_at = datetime.now(timezone.utc) - timedelta(minutes=15)
+        manager.register_position_close(
+            "XAUUSD", "win", deal_id="deal-1", source="position_monitor",
+            closed_at=closed_at,
+        )
+        # WIN cooldown for day_trading is 10 min — already expired (closed 15 min ago)
+        self.assertFalse(manager.is_active("XAUUSD"),
+                         "WIN cooldown from 15 min ago should already be expired")
+
+        # Step 2: Verified result arrives — should NOT re-register
+        manager.register_verified_result("XAUUSD", "WIN", signal_id="sig-2", closed_at=closed_at)
+
+        self.assertFalse(manager.is_active("XAUUSD"),
+                         "Late verified result should not re-register an expired cooldown")
+
 
 if __name__ == "__main__":
     unittest.main()
