@@ -192,33 +192,31 @@ def check_weekly_close_status(
         microsecond=0,
     )
 
-    # Get next open (coming Monday at open_time)
-    next_open = _get_next_weekday(now, open_day)
-    next_open = next_open.replace(
+    # Get this week's Monday open and next week's Monday open
+    this_monday_open = _get_next_weekday(now - timedelta(days=7), open_day)
+    this_monday_open = this_monday_open.replace(
         hour=open_time.hour,
         minute=open_time.minute,
         second=0,
         microsecond=0,
     )
 
+    next_monday_open = _get_next_weekday(now, open_day)
+    next_monday_open = next_monday_open.replace(
+        hour=open_time.hour,
+        minute=open_time.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    # Determine which Monday open to use for weekend check
+    # If this Monday's open has passed, use next Monday's open
+    if next_monday_open < now:
+        next_monday_open = next_monday_open + timedelta(days=7)
+
     # Check if we're in weekend (after last Saturday close, before next Monday open)
-    # If current Monday is BEFORE open time, we need the previous close
-    # If current Monday is AFTER open time, we need the current/next close
-    current_day = now.weekday()
-
-    # Special case: Monday before open time = still weekend
-    if current_day == open_day and now.hour < open_time.hour:
-        # Monday early morning before open - still weekend, last close was previous Saturday
-        pass  # next_open is already correct (today at open time)
-    # Check if we're after Saturday close = weekend started
-    elif now > last_close:
-        # Weekend has started, next_open should be the coming Monday
-        # If next_open is in the past (already passed this week's Monday open),
-        # we need to get next week's Monday
-        if next_open < now:
-            next_open = next_open + timedelta(days=7)
-
-    is_weekend = now > last_close and now < next_open
+    is_weekend = now > last_close and now < next_monday_open
+    next_open = next_monday_open  # For message display
 
     if is_weekend:
         # Market is closed for weekend
