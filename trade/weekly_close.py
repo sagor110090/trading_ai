@@ -175,9 +175,10 @@ def check_weekly_close_status(
     close_time = _parse_time_str(close_time_str)
     open_time = _parse_time_str(open_time_str)
 
-    # Get last close (previous Saturday) and next close (coming Saturday)
-    last_close = _get_next_weekday(now - timedelta(days=7), close_day)
-    last_close = last_close.replace(
+    # Determine the relevant Saturday close (the one before this Monday)
+    # and the coming Saturday close for calculating hours_until_close
+    this_saturday_close = _get_next_weekday(now - timedelta(days=7), close_day)
+    this_saturday_close = this_saturday_close.replace(
         hour=close_time.hour,
         minute=close_time.minute,
         second=0,
@@ -192,8 +193,8 @@ def check_weekly_close_status(
         microsecond=0,
     )
 
-    # Get this week's Monday open and next week's Monday open
-    this_monday_open = _get_next_weekday(now - timedelta(days=7), open_day)
+    # Get this week's Monday open for weekend check
+    this_monday_open = _get_next_weekday(this_saturday_close, open_day)
     this_monday_open = this_monday_open.replace(
         hour=open_time.hour,
         minute=open_time.minute,
@@ -201,6 +202,7 @@ def check_weekly_close_status(
         microsecond=0,
     )
 
+    # Get next Monday open for message display
     next_monday_open = _get_next_weekday(now, open_day)
     next_monday_open = next_monday_open.replace(
         hour=open_time.hour,
@@ -208,15 +210,15 @@ def check_weekly_close_status(
         second=0,
         microsecond=0,
     )
-
-    # Determine which Monday open to use for weekend check
-    # If this Monday's open has passed, use next Monday's open
     if next_monday_open < now:
         next_monday_open = next_monday_open + timedelta(days=7)
 
-    # Check if we're in weekend (after last Saturday close, before next Monday open)
-    is_weekend = now > last_close and now < next_monday_open
+    # Check if we're in weekend (after this Saturday close, before this Monday open)
+    is_weekend = now > this_saturday_close and now < this_monday_open
     next_open = next_monday_open  # For message display
+
+    # Use this_saturday_close as last_close for the weekend check
+    last_close = this_saturday_close
 
     if is_weekend:
         # Market is closed for weekend
