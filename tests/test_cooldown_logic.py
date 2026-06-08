@@ -1,12 +1,14 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 from config.settings import SETTINGS, Symbol, TradeMode
 from trade.executor import OpenPosition
 from trade.position_manager import PositionManager
 from trade.position_monitor import PositionMonitor
+from trade.tp_tracker import TPProgress
 
 
 class CooldownLogicTests(unittest.TestCase):
@@ -98,6 +100,58 @@ class CooldownLogicTests(unittest.TestCase):
             decision = manager.evaluate_trade("BTCUSD", "BUY", 0.0, 0.0)
 
         self.assertEqual(decision.action, "place")
+
+    def test_trade_decision_sync_blocks_trade_after_external_close(self) -> None:
+        from main import _handle_trade_decision
+
+        manager = PositionManager(Mock())
+        monitor = Mock()
+        monitor.sync_positions.side_effect = lambda: manager.register_position_close(
+            symbol="BTCUSD",
+            reason="external_close",
+            deal_id="external-2",
+            source="unit_test",
+        )
+        trade_signal = cast(Any, SimpleNamespace(
+            symbol="BTCUSD",
+            signal=SimpleNamespace(value="BUY"),
+            stop_loss=99000.0,
+            take_profit=101000.0,
+        ))
+        stats = {"trade_cooldown": False}
+
+        with patch("main.display_trade_skipped_cooldown"), patch("main.display_trade_skipped_existing"), patch(
+            "main.display_trade_failed"
+        ), patch("main.display_trade_placed"):
+            placed = _handle_trade_decision(
+                client=Mock(),
+                trade_signal=trade_signal,
+                position_manager=manager,
+                stats=stats,
+                position_monitor=monitor,
+            )
+
+        self.assertFalse(placed)
+        self.assertTrue(stats["trade_cooldown"])
+        self.assertTrue(manager.is_active("BTCUSD"))
+
+    def test_external_close_classifies_tp_when_tp_was_observed(self) -> None:
+        monitor = PositionMonitor(Mock())
+        tracker = TPProgress(
+            symbol="BTCUSD",
+            direction="BUY",
+            entry_price=100000.0,
+            stop_loss=99000.0,
+            take_profit=101000.0,
+            size=0.1,
+            opened_at=datetime.now(timezone.utc),
+        )
+        tracker.highest_tp_progress = 1.05
+
+        close_reason, reason_text = monitor._classify_external_close(tracker)
+
+        self.assertEqual(close_reason, "tp_close")
+        self.assertIn("Take profit", reason_text)
 
 
 if __name__ == "__main__":

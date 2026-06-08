@@ -265,12 +265,19 @@ def display_position_external_close(
     symbol: str,
     direction: str,
     cooldown_minutes: int,
+    close_reason: str = "external_close",
 ) -> None:
     """Show that a position was closed externally (SL/TP hit at broker)."""
     dir_style = "[bold green]BUY[/]" if direction == "BUY" else "[bold red]SELL[/]"
+    if close_reason == "tp_close":
+        close_text = "Take profit hit at broker"
+    elif close_reason == "sl_close":
+        close_text = "Stop loss hit at broker"
+    else:
+        close_text = "Position closed externally (broker or manual close)"
     content = (
         f"  [yellow]🔔 EXTERNAL CLOSE[/]  {dir_style} [white]{symbol}[/]\n"
-        f"  [dim]Position closed by broker (SL or TP hit)[/]\n"
+        f"  [dim]{close_text}[/]\n"
         f"  [dim]Cooldown started[/]  {cooldown_minutes} minutes before re-entry"
     )
     console.print(Panel(content, title="[bold yellow]External Close[/]", border_style="yellow", padding=(0, 2)))

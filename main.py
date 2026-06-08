@@ -324,10 +324,15 @@ def _check_position_strength(
                 )
             elif decision.action == "external_close":
                 has_close = True
+                status_label = "EXTERNAL"
+                if decision.close_reason == "tp_close":
+                    status_label = "TP HIT"
+                elif decision.close_reason == "sl_close":
+                    status_label = "SL HIT"
                 table.add_row(
                     decision.symbol[:10],
                     decision.direction[:4],
-                    f"[yellow]SL/TP[/]",
+                    f"[yellow]{status_label}[/]",
                     f"[yellow]{decision.pnl or 0:+.2f}[/]",
                     "N/A",
                     "[yellow]EXTERNAL[/]",
@@ -346,6 +351,7 @@ def _check_position_strength(
                     decision.symbol,
                     decision.direction,
                     cooldown_minutes=actual_cooldown,
+                    close_reason=decision.close_reason or "external_close",
                 )
             elif decision.action == "trail_stop":
                 table.add_row(
@@ -467,6 +473,10 @@ def run_signal_cycle(
         }
 
         fetched: dict[str, pd.DataFrame] = {}
+
+        # Catch broker/manual closes as late as possible before analysis.
+        if position_monitor is not None:
+            position_monitor.sync_positions()
 
         # ── 0.5. Check weekly close ────────────────────────────────────────
         skip_symbol = False
@@ -651,7 +661,13 @@ def run_signal_cycle(
 
                     # Even for duplicates, check if we should reverse
                     if SETTINGS.auto_trade and should_trade:
-                        trade_placed = _handle_trade_decision(client, trade_signal, position_manager, stats)
+                        trade_placed = _handle_trade_decision(
+                            client,
+                            trade_signal,
+                            position_manager,
+                            stats,
+                            position_monitor=position_monitor,
+                        )
                         # Only save the signal if a new trade was actually placed
                         if trade_placed:
                             _store_signal(trade_signal)
@@ -704,7 +720,13 @@ def run_signal_cycle(
 
                 # ── Auto-trade ──────────────────────────────────────────
                 if SETTINGS.auto_trade and should_trade:
-                    _handle_trade_decision(client, trade_signal, position_manager, stats)
+                    _handle_trade_decision(
+                        client,
+                        trade_signal,
+                        position_manager,
+                        stats,
+                        position_monitor=position_monitor,
+                    )
                 elif SETTINGS.auto_trade and not should_trade:
                     display_trade_blocked("ML filter")
                     stats["trade_blocked"] = True
@@ -728,6 +750,7 @@ def _handle_trade_decision(
     trade_signal: TradeSignal,
     position_manager: PositionManager,
     stats: dict,
+    position_monitor: Optional[PositionMonitor] = None,
 ) -> bool:
     """Evaluate and execute a trade based on position state.
 
@@ -740,6 +763,17 @@ def _handle_trade_decision(
     4. Cooldown active → skip (returns False)
     """
     from trade.executor import OrderResult
+
+    if position_monitor is not None:
+        position_monitor.sync_positions()
+
+    if position_manager.is_active(trade_signal.symbol):
+        display_trade_skipped_cooldown(
+            trade_signal.symbol,
+            position_manager.get_cooldown_remaining_minutes(trade_signal.symbol),
+        )
+        stats["trade_cooldown"] = True
+        return False
 
     decision = position_manager.evaluate_trade(
         trade_signal.symbol,

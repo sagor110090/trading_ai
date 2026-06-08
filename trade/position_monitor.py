@@ -40,6 +40,7 @@ class MonitorDecision:
     """Decision made by position monitor."""
     action: str  # "hold", "close", "trail_stop", "error", "external_close"
     reason: str
+    close_reason: str = ""
     symbol: str = ""  # Symbol name
     direction: str = ""  # "BUY" or "SELL"
     tp_progress: float = 0.0
@@ -115,10 +116,11 @@ class PositionMonitor:
 
             # Store externally closed position info for cooldown registration
             normalized_symbol = normalize_symbol(tracker.symbol)
+            close_reason, reason_text = self._classify_external_close(tracker)
             if self._on_position_closed:
                 self._on_position_closed(
                     symbol=normalized_symbol,
-                    reason="external_close",
+                    reason=close_reason,
                     deal_id=key,
                     source="position_monitor_external",
                 )
@@ -129,19 +131,21 @@ class PositionMonitor:
                 "entry": tracker.entry_price,
                 "sl": tracker.stop_loss,
                 "tp": tracker.take_profit,
+                "close_reason": close_reason,
+                "reason_text": reason_text,
             })
 
             final_stats = self.tp_tracker.close_position(
                 tracker.symbol, tracker.direction,
                 exit_price=0,  # Unknown - position closed externally
-                reason="external_close",
+                reason=close_reason,
                 deal_id=key,
             )
             if final_stats:
                 self._log_trade(final_stats, normalize_symbol(tracker.symbol))
             logger.info(
-                "Stopped tracking (external close): key=%s %s %s - will register cooldown",
-                key, tracker.direction, tracker.symbol,
+                "Stopped tracking (external close): key=%s %s %s reason=%s - will register cooldown",
+                key, tracker.direction, tracker.symbol, close_reason,
             )
 
         self._synced_with_broker = True
@@ -175,7 +179,8 @@ class PositionMonitor:
             # Since we don't have final PnL for external closes, we assume SL hit = loss
             decisions.append(MonitorDecision(
                 action="external_close",
-                reason="Position closed by broker (SL/TP hit)",
+                reason=closed["reason_text"],
+                close_reason=closed["close_reason"],
                 symbol=closed["symbol"],
                 direction=closed["direction"],
                 tp_progress=0.0,
@@ -575,6 +580,20 @@ class PositionMonitor:
             "Position closed and verified: %s %s (deal_id=%s)",
             pos.direction, pos.epic, pos.deal_id,
         )
+
+    def _classify_external_close(self, tracker: TPProgress) -> tuple[str, str]:
+        """Classify an externally closed position using only observed tracker evidence."""
+        if tracker.highest_tp_progress >= 1.0:
+            return "tp_close", "Take profit hit at broker"
+
+        stop_loss = tracker.stop_loss
+        if stop_loss and stop_loss != tracker.entry_price and tracker.mae_price:
+            if tracker.direction.upper() == "BUY" and tracker.mae_price <= stop_loss:
+                return "sl_close", "Stop loss hit at broker"
+            if tracker.direction.upper() == "SELL" and tracker.mae_price >= stop_loss:
+                return "sl_close", "Stop loss hit at broker"
+
+        return "external_close", "Position closed externally (broker or manual close)"
 
     def _log_trade(self, stats: dict, normalized_symbol: Optional[str] = None) -> None:
         """Log trade statistics to database.

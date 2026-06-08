@@ -614,11 +614,11 @@ class PositionManager:
     @staticmethod
     def _resolve_cooldown_minutes(trade_mode: str, reason: str) -> int:
         """Resolve cooldown duration for a given close reason."""
-        if reason in ("loss", "timeout", "external_close"):
+        if reason in ("loss", "timeout", "external_close", "sl_close"):
             return COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
         if reason == "breakeven":
             return COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
-        if reason == "win":
+        if reason in ("win", "tp_close"):
             return COOLDOWN_AFTER_WIN.get(trade_mode, 10)
         if reason == "reversal":
             return 2
