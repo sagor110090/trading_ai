@@ -255,6 +255,11 @@ def generate_new_signals(
     """
     console.print(f"\n[bold cyan]🔄 Generating signals for NEW data ({symbol.value})[/]")
 
+    # DB-loaded timestamps are tz-naive (SQLite strips timezone info),
+    # so strip tz from from_date to ensure consistent comparisons.
+    if from_date.tzinfo is not None:
+        from_date = from_date.replace(tzinfo=None)
+
     # Load all candles (historical + new)
     df_m5 = _load_candles_from_db(symbol.value, Timeframe.M5.value, limit=20000)
     df_h1 = _load_candles_from_db(symbol.value, Timeframe.H1.value, limit=5000)
