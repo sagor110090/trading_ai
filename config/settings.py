@@ -157,7 +157,7 @@ class DayTradingConfig:
     big_picture_timeframe: str = "4h"
     confluence_label: str = "day_trading"
     # Max time a day trade stays open (minutes)
-    max_hold_minutes: int = 120
+    max_hold_minutes: int = 240
 
 
 @dataclass(frozen=True)
@@ -171,7 +171,7 @@ class SwingConfig:
     entry_timeframe: str = "5m"
     confluence_label: str = "swing"
     # Max time a swing trade stays open (minutes)
-    max_hold_minutes: int = 480
+    max_hold_minutes: int = 1440
 
 
 @dataclass(frozen=True)
