@@ -1,27 +1,32 @@
 """Common utility functions for the trading system."""
 
-def normalize_symbol(symbol: str) -> str:
-    """Strip 'm' suffix from broker symbols for database/ML consistency.
 
-    Many MT5 brokers add 'm' suffix to currency pairs (e.g., BTCUSDm, AUDUSDm).
-    This function normalizes them to the base symbol name for consistent
-    database storage and ML model training.
+def normalize_symbol(symbol: str) -> str:
+    """Normalize broker symbol variants into a stable uppercase key.
+
+    Handles common broker suffixes so cooldowns, DB rows, and trade decisions
+    all use the same symbol key.
 
     Examples:
         BTCUSDm -> BTCUSD
         XAUUSDm -> XAUUSD
-        AUDUSDm -> AUDUSD
-        XAGUSDm -> XAGUSD
-        US30m -> US30
-        BTCUSD -> BTCUSD (no change)
-
-    Args:
-        symbol: The symbol name (with or without 'm' suffix)
-
-    Returns:
-        Normalized symbol name without 'm' suffix
+        US30.cash -> US30
+        btcusd -> BTCUSD
     """
-    return symbol[:-1] if symbol.endswith("m") and len(symbol) > 1 else symbol
+    if not symbol:
+        return symbol
+
+    normalized = str(symbol).strip().upper()
+
+    # Strip common CFD suffixes before the MT5 broker suffix.
+    for suffix in (".CASH",):
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+
+    if normalized.endswith("M") and len(normalized) > 1:
+        normalized = normalized[:-1]
+
+    return normalized
 
 
 def broker_symbol(symbol: str) -> str:

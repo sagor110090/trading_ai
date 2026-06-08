@@ -18,6 +18,7 @@ Solution:
 """
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -112,6 +113,8 @@ class PositionManager:
         self.client = client
         self.cooldowns: list[CooldownEntry] = []
         self._broker_positions: list[OpenPosition] = []
+        self._closed_position_keys: dict[str, datetime] = {}
+        self._lock = threading.RLock()
 
     # ── Sync with broker ──────────────────────────────────────────────────
 
@@ -156,18 +159,15 @@ class PositionManager:
     def should_generate_signal(self, symbol: str) -> tuple[bool, str]:
         """Check if signal GENERATION should be skipped.
 
-        We ALWAYS generate signals (for ML training) unless:
-        - A cooldown is active for this symbol after a LOSS
+        We ALWAYS generate signals (for ML training) unless a cooldown is active
+        for this symbol.
 
         Returns (should_generate, reason).
         """
-        now = datetime.now(timezone.utc)
-
-        # Only skip generation entirely if in loss cooldown
-        for cd in self.cooldowns:
-            if cd.symbol == symbol and cd.reason == "loss" and now < cd.until:
-                remaining = (cd.until - now).total_seconds() / 60
-                return False, f"Loss cooldown: {remaining:.0f} min remaining"
+        active_entry = self.get_active_cooldown(symbol)
+        if active_entry is not None:
+            remaining = self.get_cooldown_remaining_minutes(symbol)
+            return False, f"Cooldown: {remaining:.0f} min remaining after {active_entry.reason}"
 
         return True, ""
 
@@ -182,48 +182,51 @@ class PositionManager:
         - "reverse_and_place": opposite direction → close old, place new
         - Same direction position → SKIP (already in this trade)
         """
-        now = datetime.now(timezone.utc)
+        canonical_symbol = self.canonicalize_symbol(symbol)
 
         # 1. Check cooldowns
-        for cd in self.cooldowns:
-            if cd.symbol == symbol:
-                remaining_seconds = (cd.until - now).total_seconds()
-                # Consider cooldowns with < 30 seconds remaining as expired
-                if remaining_seconds > 30:
-                    remaining_minutes = remaining_seconds / 60
-                    return TradeDecision(
-                        action="skip_cooldown",
-                        reason=f"Cooldown: {remaining_minutes:.0f} min left after {cd.reason}",
-                        cooldown_remaining_minutes=remaining_minutes,
-                    )
+        active_cooldown = self.get_active_cooldown(canonical_symbol)
+        if active_cooldown is not None:
+            remaining_minutes = self.get_cooldown_remaining_minutes(canonical_symbol)
+            logger.info(
+                "%s: cooldown check before trade evaluation -> ACTIVE (%s, %.1f min remaining)",
+                canonical_symbol,
+                active_cooldown.reason,
+                remaining_minutes,
+            )
+            return TradeDecision(
+                action="skip_cooldown",
+                reason=f"Cooldown: {remaining_minutes:.0f} min left after {active_cooldown.reason}",
+                cooldown_remaining_minutes=remaining_minutes,
+            )
+
+        logger.info("%s: cooldown check before trade evaluation -> CLEAR", canonical_symbol)
 
         # 2. Check open positions
         self.sync_positions()
-        epic = self._get_epic(symbol)
 
-        if epic:
-            for pos in self._broker_positions:
-                if pos.epic == epic:
-                    pos_dir = pos.direction.upper()
-                    new_dir = direction.upper()
+        for pos in self._broker_positions:
+            if self._position_matches_symbol(pos.epic, canonical_symbol):
+                pos_dir = pos.direction.upper()
+                new_dir = direction.upper()
 
-                    if pos_dir == new_dir:
-                        # Same direction — skip, already in this trade
-                        return TradeDecision(
-                            action="skip_same_direction",
-                            reason=f"Open {pos_dir} {symbol} — same direction, skipping",
-                            cooldown_remaining_minutes=0.0,
-                        )
-                    else:
-                        # Opposite direction — close old, take new
-                        return TradeDecision(
-                            action="reverse_and_place",
-                            reason=(
-                                f"Open {pos_dir} {symbol} opposes new {new_dir} — "
-                                f"close position {pos.deal_id} and reverse"
-                            ),
-                            existing_position=pos,
-                        )
+                if pos_dir == new_dir:
+                    # Same direction — skip, already in this trade
+                    return TradeDecision(
+                        action="skip_same_direction",
+                        reason=f"Open {pos_dir} {canonical_symbol} — same direction, skipping",
+                        cooldown_remaining_minutes=0.0,
+                    )
+
+                # Opposite direction — close old, take new
+                return TradeDecision(
+                    action="reverse_and_place",
+                    reason=(
+                        f"Open {pos_dir} {canonical_symbol} opposes new {new_dir} — "
+                        f"close position {pos.deal_id} and reverse"
+                    ),
+                    existing_position=pos,
+                )
 
         # 3. Check correlation limits (prevent overexposure in correlated groups)
         from trade.correlation import check_correlation_limit
@@ -273,6 +276,10 @@ class PositionManager:
         if decision.action == "reverse_and_place":
             # Close the existing position first
             pos = decision.existing_position
+            if pos is None:
+                result["reason"] = "Missing existing position for reversal"
+                logger.error(result["reason"])
+                return result
             logger.info(
                 "Reversing position: closing %s %s (deal %s) to take opposite trade",
                 pos.direction, pos.epic, pos.deal_id,
@@ -283,8 +290,12 @@ class PositionManager:
                 result["reason"] = f"Failed to close existing position: {close_result.error}"
                 return result
 
-            # Short cooldown after reversal
-            self.register_closed(symbol=trade_signal.symbol, reason="reversal")
+            self.register_position_close(
+                symbol=trade_signal.symbol,
+                reason="reversal",
+                deal_id=pos.deal_id,
+                source="reverse_and_place",
+            )
 
             result["closed_position"] = f"{pos.direction} {pos.epic} (deal {pos.deal_id})"
             logger.info("Position closed successfully: %s", close_result.deal_id)
@@ -310,58 +321,119 @@ class PositionManager:
 
     # ── Register events ────────────────────────────────────────────────────
 
-    def register_closed(self, symbol: str, reason: str) -> None:
-        """Register that a position was closed. Starts a cooldown.
-
-        Args:
-            reason: "win", "loss", "breakeven", "timeout", "reversal", "strength_exit"
-        """
+    def register_position_close(
+        self,
+        symbol: str,
+        reason: str,
+        deal_id: Optional[str] = None,
+        source: str = "unknown",
+    ) -> CooldownEntry:
+        """Register a confirmed position close and start the symbol cooldown."""
+        canonical_symbol = self.canonicalize_symbol(symbol)
         trade_mode = SETTINGS.trade_mode.value
+        now = datetime.now(timezone.utc)
+        close_key = str(deal_id) if deal_id else None
 
-        if reason == "loss":
-            cooldown_minutes = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
-        elif reason == "breakeven":
-            cooldown_minutes = COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
-        elif reason == "win":
-            cooldown_minutes = COOLDOWN_AFTER_WIN.get(trade_mode, 10)
-        elif reason == "timeout":
-            cooldown_minutes = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
-        elif reason == "reversal":
-            cooldown_minutes = 2
-        elif reason == "strength_exit":
-            # Longer cooldown for strength exit (trade was weak/struggling)
-            cooldown_minutes = COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
-        else:
-            cooldown_minutes = 5
+        with self._lock:
+            self._cleanup_expired_close_keys(now)
 
-        until = datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
-        self.cooldowns.append(CooldownEntry(
-            symbol=symbol,
-            reason=reason,
-            until=until,
-        ))
+            if close_key and close_key in self._closed_position_keys:
+                existing_entry = self.get_active_cooldown(canonical_symbol)
+                logger.info(
+                    "Position close already registered: symbol=%s deal_id=%s reason=%s source=%s",
+                    canonical_symbol,
+                    close_key,
+                    reason,
+                    source,
+                )
+                return existing_entry or CooldownEntry(
+                    symbol=canonical_symbol,
+                    reason=reason,
+                    until=now,
+                )
+
+            cooldown_minutes = self._resolve_cooldown_minutes(trade_mode, reason)
+            until = now + timedelta(minutes=cooldown_minutes)
+
+            # Keep the longest active cooldown for the symbol to avoid stacking
+            # duplicate entries from competing close paths.
+            active_for_symbol = [
+                cd for cd in self.cooldowns
+                if cd.symbol == canonical_symbol and cd.until > now
+            ]
+            if active_for_symbol:
+                longest_until = max(cd.until for cd in active_for_symbol)
+                if longest_until > until:
+                    until = longest_until
+
+            self.cooldowns = [
+                cd for cd in self.cooldowns
+                if not (cd.symbol == canonical_symbol and cd.until > now)
+            ]
+            entry = CooldownEntry(
+                symbol=canonical_symbol,
+                reason=reason,
+                until=until,
+            )
+            self.cooldowns.append(entry)
+            if close_key:
+                self._closed_position_keys[close_key] = until
 
         logger.info(
+            "Position closed: symbol=%s reason=%s deal_id=%s source=%s",
+            canonical_symbol,
+            reason,
+            close_key or "n/a",
+            source,
+        )
+        logger.info("Close reason: %s %s", canonical_symbol, reason)
+        logger.info(
             "Cooldown started: %s — %d min after %s (expires %s UTC)",
-            symbol, cooldown_minutes, reason, until.strftime("%H:%M:%S"),
+            canonical_symbol,
+            cooldown_minutes,
+            reason,
+            until.strftime("%H:%M:%S"),
+        )
+        logger.info(
+            "Cooldown remaining: %s %.1f min",
+            canonical_symbol,
+            max((until - now).total_seconds() / 60, 0.0),
+        )
+        return entry
+
+    def register_closed(
+        self,
+        symbol: str,
+        reason: str,
+        deal_id: Optional[str] = None,
+        source: str = "legacy",
+    ) -> CooldownEntry:
+        """Backward-compatible alias for close registration."""
+        return self.register_position_close(
+            symbol=symbol,
+            reason=reason,
+            deal_id=deal_id,
+            source=source,
         )
 
     def register_verified_result(self, symbol: str, result: str) -> None:
         """Register a verified signal result. Starts cooldown for losses."""
         if result in ("LOSS", "BREAKEVEN"):
-            self.register_closed(symbol, "loss")
+            self.register_position_close(symbol, "loss", source="verified_result")
         elif result == "WIN":
-            self.register_closed(symbol, "win")
+            self.register_position_close(symbol, "win", source="verified_result")
 
     # ── Cleanup ────────────────────────────────────────────────────────────
 
     def cleanup_expired_cooldowns(self) -> None:
         """Remove expired cooldowns."""
         now = datetime.now(timezone.utc)
-        expired = [cd for cd in self.cooldowns if cd.until <= now]
-        for cd in expired:
-            logger.debug("Cooldown expired: %s after %s", cd.symbol, cd.reason)
-        self.cooldowns = [cd for cd in self.cooldowns if cd.until > now]
+        with self._lock:
+            expired = [cd for cd in self.cooldowns if cd.until <= now]
+            for cd in expired:
+                logger.debug("Cooldown expired: %s after %s", cd.symbol, cd.reason)
+            self.cooldowns = [cd for cd in self.cooldowns if cd.until > now]
+            self._cleanup_expired_close_keys(now)
 
     # ── Weekly Close Handling ───────────────────────────────────────────────
 
@@ -426,8 +498,12 @@ class PositionManager:
                 close_result = close_position_unified(self.client, pos)
                 if close_result.success:
                     closed_positions.append(close_result)
-                    # Register as closed for cooldown tracking
-                    self.register_closed(symbol, "weekly_close")
+                    self.register_position_close(
+                        symbol=symbol,
+                        reason="weekly_close",
+                        deal_id=pos.deal_id,
+                        source="weekly_close",
+                    )
                 else:
                     logger.error(
                         "Failed to close position %s: %s",
@@ -456,21 +532,122 @@ class PositionManager:
         except (ValueError, KeyError):
             return None
 
+    def canonicalize_symbol(self, symbol: str) -> str:
+        """Resolve broker/strategy symbol variants to the configured symbol key."""
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            return normalized
+
+        active_candidates = [s.value if hasattr(s, "value") else str(s) for s in SETTINGS.symbols]
+        all_candidates = active_candidates + [
+            s.value for s in Symbol
+            if s.value not in active_candidates
+        ]
+
+        matches: list[str] = []
+        for candidate in all_candidates:
+            candidate_key = normalize_symbol(candidate)
+            if candidate_key == normalized:
+                return candidate
+
+            candidate_epic = self._get_epic(candidate)
+            if candidate_epic and normalize_symbol(candidate_epic) == normalized:
+                matches.append(candidate)
+
+        if len(matches) > 1:
+            logger.warning(
+                "Ambiguous symbol normalization for %s -> %s; using %s",
+                symbol,
+                matches,
+                matches[0],
+            )
+        if matches:
+            return matches[0]
+
+        return normalized
+
+    def get_active_cooldown(self, symbol: str) -> Optional[CooldownEntry]:
+        """Return the active cooldown for a symbol, if any."""
+        canonical_symbol = self.canonicalize_symbol(symbol)
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            active_entries = [
+                cd for cd in self.cooldowns
+                if cd.symbol == canonical_symbol and cd.until > now
+            ]
+
+        if not active_entries:
+            return None
+
+        return max(active_entries, key=lambda entry: entry.until)
+
+    def get_cooldown_remaining_minutes(self, symbol: str) -> float:
+        """Return active cooldown minutes remaining for the symbol."""
+        active_entry = self.get_active_cooldown(symbol)
+        if active_entry is None:
+            return 0.0
+
+        remaining_seconds = (active_entry.until - datetime.now(timezone.utc)).total_seconds()
+        return max(remaining_seconds / 60, 0.0)
+
+    def is_active(self, symbol: str) -> bool:
+        """Check whether a symbol is currently in cooldown."""
+        canonical_symbol = self.canonicalize_symbol(symbol)
+        active_entry = self.get_active_cooldown(canonical_symbol)
+        if active_entry is None:
+            logger.info("%s: cooldown check before signal generation -> CLEAR", canonical_symbol)
+            return False
+
+        remaining = self.get_cooldown_remaining_minutes(canonical_symbol)
+        logger.info(
+            "%s: cooldown check before signal generation -> ACTIVE (%s, %.1f min remaining)",
+            canonical_symbol,
+            active_entry.reason,
+            remaining,
+        )
+        return True
+
+    def _position_matches_symbol(self, position_symbol: str, requested_symbol: str) -> bool:
+        """Compare broker symbols and strategy symbols using the canonical key."""
+        return self.canonicalize_symbol(position_symbol) == self.canonicalize_symbol(requested_symbol)
+
+    @staticmethod
+    def _resolve_cooldown_minutes(trade_mode: str, reason: str) -> int:
+        """Resolve cooldown duration for a given close reason."""
+        if reason in ("loss", "timeout", "external_close"):
+            return COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
+        if reason == "breakeven":
+            return COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
+        if reason == "win":
+            return COOLDOWN_AFTER_WIN.get(trade_mode, 10)
+        if reason == "reversal":
+            return 2
+        if reason == "strength_exit":
+            return COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
+        return 5
+
+    def _cleanup_expired_close_keys(self, now: datetime) -> None:
+        """Drop dedupe keys after their associated cooldown has expired."""
+        self._closed_position_keys = {
+            key: until for key, until in self._closed_position_keys.items()
+            if until > now
+        }
+
     def get_status(self, symbol: str) -> dict:
         """Get current position manager status for a symbol."""
         now = datetime.now(timezone.utc)
-        epic = self._get_epic(symbol)
+        canonical_symbol = self.canonicalize_symbol(symbol)
 
-        active_cooldowns = [
-            cd for cd in self.cooldowns
-            if cd.symbol == symbol and cd.until > now
-        ]
+        with self._lock:
+            active_cooldowns = [
+                cd for cd in self.cooldowns
+                if cd.symbol == canonical_symbol and cd.until > now
+            ]
 
         open_for_symbol = []
-        if epic:
-            for pos in self._broker_positions:
-                if pos.epic == epic:
-                    open_for_symbol.append(pos)
+        for pos in self._broker_positions:
+            if self._position_matches_symbol(pos.epic, canonical_symbol):
+                open_for_symbol.append(pos)
 
         return {
             "has_open_position": len(open_for_symbol) > 0,

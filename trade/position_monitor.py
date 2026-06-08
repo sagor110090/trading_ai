@@ -15,7 +15,7 @@ Integrates with:
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import pandas as pd
 
@@ -30,7 +30,7 @@ from trade.executor import (
     update_position_sl_tp_unified,
 )
 from trade.strength_score import TradeStrengthScore, StrengthScoreComponents, StrengthScoreResult
-from trade.tp_tracker import TPProgressTracker
+from trade.tp_tracker import TPProgress, TPProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +62,13 @@ class PositionMonitor:
                 # Position closed externally (SL/TP hit at broker)
     """
 
-    def __init__(self, client):
+    def __init__(self, client, on_position_closed: Optional[Callable[..., object]] = None):
         self.client = client
         self.tp_tracker = TPProgressTracker()
         self.strength_scorer = TradeStrengthScore()
         self._synced_with_broker = False
         self._externally_closed: list[dict] = []  # Track positions closed by broker (SL/TP)
+        self._on_position_closed = on_position_closed
 
     def sync_positions(self) -> None:
         """Sync tracked positions with broker's open positions.
@@ -114,6 +115,13 @@ class PositionMonitor:
 
             # Store externally closed position info for cooldown registration
             normalized_symbol = normalize_symbol(tracker.symbol)
+            if self._on_position_closed:
+                self._on_position_closed(
+                    symbol=normalized_symbol,
+                    reason="external_close",
+                    deal_id=key,
+                    source="position_monitor_external",
+                )
             self._externally_closed.append({
                 "deal_id": key,
                 "symbol": normalized_symbol,
@@ -140,7 +148,7 @@ class PositionMonitor:
 
     def check_all_positions(
         self,
-        df_provider: callable = None,
+        df_provider: Optional[Callable] = None,
     ) -> list[MonitorDecision]:
         """Check all open positions and make decisions.
 
@@ -206,7 +214,7 @@ class PositionMonitor:
     def _check_position(
         self,
         pos: OpenPosition,
-        df_provider: callable = None,
+        df_provider: Optional[Callable] = None,
     ) -> MonitorDecision:
         """Check a single position and make decision.
 
@@ -348,7 +356,7 @@ class PositionMonitor:
     def _check_trailing_stop(
         self,
         pos: OpenPosition,
-        tracked: Optional[object],
+        tracked: Optional[TPProgress],
         current_price: float,
         tp_progress: float,
     ) -> Optional[MonitorDecision]:
@@ -443,7 +451,7 @@ class PositionMonitor:
             # Update the tracker's stop_loss so next cycle compares against the new SL
             deal_id = str(pos.deal_id)
             tracked = self.tp_tracker.get_position(pos.epic, pos.direction, deal_id=deal_id)
-            if tracked is not None:
+            if tracked is not None and decision.new_sl is not None:
                 tracked.stop_loss = decision.new_sl
 
             logger.info(
@@ -459,7 +467,7 @@ class PositionMonitor:
     def _evaluate_strength(
         self,
         pos: OpenPosition,
-        df_provider: callable,
+        df_provider: Callable,
     ) -> StrengthScoreResult:
         """Evaluate trade strength for a position.
 
@@ -546,6 +554,13 @@ class PositionMonitor:
 
         # Get final stats from tracker (use normalized symbol)
         normalized_symbol = normalize_symbol(pos.epic)
+        if self._on_position_closed:
+            self._on_position_closed(
+                symbol=normalized_symbol,
+                reason="strength_exit",
+                deal_id=str(pos.deal_id),
+                source="position_monitor_strength",
+            )
         final_stats = self.tp_tracker.close_position(
             normalized_symbol, pos.direction,
             exit_price=close_result.close_level or pos.level,
@@ -561,7 +576,7 @@ class PositionMonitor:
             pos.direction, pos.epic, pos.deal_id,
         )
 
-    def _log_trade(self, stats: dict, normalized_symbol: str = None) -> None:
+    def _log_trade(self, stats: dict, normalized_symbol: Optional[str] = None) -> None:
         """Log trade statistics to database.
 
         Args:
@@ -608,7 +623,7 @@ class PositionMonitor:
         stop_loss: float,
         take_profit: float,
         size: float,
-        signal_id: str = None,
+        signal_id: Optional[str] = None,
     ) -> None:
         """Add a position to tracking (e.g., right after placing a trade)."""
         # Normalize symbol for database consistency

@@ -11,6 +11,8 @@ Key behaviors:
 import logging
 import sys
 import threading
+from datetime import datetime, timezone
+from typing import Optional
 
 import pandas as pd
 from rich.logging import RichHandler
@@ -55,7 +57,7 @@ from trade.executor import (
     close_position_unified,
     place_trade_unified,
 )
-from trade.position_manager import PositionManager, COOLDOWN_AFTER_LOSS
+from trade.position_manager import PositionManager
 from trade.position_monitor import PositionMonitor
 from trade.weekly_close import check_weekly_close_status
 from rich.panel import Panel
@@ -320,9 +322,6 @@ def _check_position_strength(
                     f"[red]{decision.strength_score or 0:.1f}[/]",
                     "[red]CLOSED[/]",
                 )
-                # Strength exit: use longer cooldown regardless of PnL
-                # These trades were struggling/weak, even if they made small profit
-                position_manager.register_closed(decision.symbol, "strength_exit")
             elif decision.action == "external_close":
                 has_close = True
                 table.add_row(
@@ -333,11 +332,14 @@ def _check_position_strength(
                     "N/A",
                     "[yellow]EXTERNAL[/]",
                 )
-                # Get actual cooldown based on trade mode
-                actual_cooldown = COOLDOWN_AFTER_LOSS.get(SETTINGS.trade_mode.value, 30)
-                position_manager.register_closed(decision.symbol, "loss")
+                active_cooldown = position_manager.get_active_cooldown(decision.symbol)
+                actual_cooldown = 0
+                if active_cooldown is not None:
+                    actual_cooldown = round(
+                        max((active_cooldown.until - datetime.now(timezone.utc)).total_seconds() / 60, 0.0)
+                    )
                 logger.info(
-                    "External close detected: %s %s - registered %dmin cooldown",
+                    "External close detected: %s %s - cooldown already active for %dmin",
                     decision.symbol, decision.direction, actual_cooldown,
                 )
                 display_position_external_close(
@@ -412,7 +414,7 @@ def _check_position_strength(
 def run_signal_cycle(
     client: CapitalComClient,
     position_manager: PositionManager,
-    position_monitor: PositionMonitor = None,
+    position_monitor: Optional[PositionMonitor] = None,
 ) -> None:
     """One complete cycle: fetch data for all timeframes, run confluence, verify, predict.
 
@@ -424,6 +426,17 @@ def run_signal_cycle(
     """
     # Clean up expired cooldowns
     position_manager.cleanup_expired_cooldowns()
+    timeout_closed_symbols: set[str] = set()
+
+    # Sync broker state before evaluating symbols so external/manual closes
+    # activate cooldowns in the same cycle they are discovered.
+    if position_monitor is not None:
+        position_monitor.sync_positions()
+
+    # Timeout checks must run once per cycle, not once per symbol, otherwise
+    # a single broker close can be processed multiple times under the wrong key.
+    if SETTINGS.auto_trade:
+        timeout_closed_symbols = _check_timeouts(client, position_manager)
 
     # NOTE: Position-monitor display is handled by the background
     # _monitor_loop (runs every 60s). It is intentionally NOT called
@@ -448,16 +461,12 @@ def run_signal_cycle(
             "ml_drift_detected": False,
             "verified": 0,
             "auto_train_started": False,
-            "timeout_closed": False,
+            "timeout_closed": symbol.value in timeout_closed_symbols,
             "strength_exit": False,
             "weekly_close_closed": 0,
         }
 
         fetched: dict[str, pd.DataFrame] = {}
-
-        # ── 0. Check position timeouts ──────────────────────────────────
-        if SETTINGS.auto_trade:
-            _check_timeouts(client, stats, position_manager, symbol.value)
 
         # ── 0.5. Check weekly close ────────────────────────────────────────
         skip_symbol = False
@@ -548,7 +557,17 @@ def run_signal_cycle(
                 except Exception as e:
                     logger.warning("Drift detection error: %s", e)
 
-        # ── 3. Check if we should skip signal generation ─────────────────
+        # ── 3. Hard cooldown gate before signal generation ───────────────
+        if position_manager.is_active(symbol.value):
+            remaining_min = position_manager.get_cooldown_remaining_minutes(symbol.value)
+            logger.info("%s: cooldown active, skipping signal generation", symbol.value)
+            display_signal_skipped_cooldown(symbol.value, remaining_min)
+            if SETTINGS.ml.auto_train:
+                _try_auto_train(symbol.value, stats)
+            display_cycle_summary(stats)
+            continue
+
+        # ── 4. Check if we should skip signal generation ─────────────────
         should_generate, skip_reason = position_manager.should_generate_signal(symbol.value)
         if not should_generate:
             # Extract remaining minutes from skip_reason (format: "Loss cooldown: X min remaining")
@@ -565,7 +584,7 @@ def run_signal_cycle(
             display_cycle_summary(stats)
             continue
 
-        # ── 4. Multi-timeframe confluence signal ────────────────────────
+        # ── 5. Multi-timeframe confluence signal ────────────────────────
         df_h4 = fetched.get(Timeframe.H4.value, pd.DataFrame())
         df_h1 = fetched.get(Timeframe.H1.value, pd.DataFrame())
         df_m5 = fetched.get(Timeframe.M5.value, pd.DataFrame())
@@ -696,7 +715,7 @@ def run_signal_cycle(
             logger.warning("Missing H4 or H1 data for confluence check on %s", symbol.value)
             display_missing_confluence_data(symbol.value, len(df_h4), len(df_h1), len(df_m5))
 
-        # ── 5. Auto-train ───────────────────────────────────────────────
+        # ── 6. Auto-train ───────────────────────────────────────────────
         if SETTINGS.ml.auto_train:
             _try_auto_train(symbol.value, stats)
 
@@ -753,6 +772,10 @@ def _handle_trade_decision(
     if decision.action == "reverse_and_place":
         # Close existing position, then place new one
         pos = decision.existing_position
+        if pos is None:
+            logger.error("Reverse requested without an existing position for %s", trade_signal.symbol)
+            stats["trade_failed"] = True
+            return False
         console.print(
             f"  [yellow]🔄 Reversing:[/] closing {pos.direction} {pos.epic} "
             f"to take {trade_signal.signal.value}"
@@ -766,8 +789,12 @@ def _handle_trade_decision(
             stats["trade_failed"] = True
             return False  # No new trade placed
 
-        # Register the closed position
-        position_manager.register_closed(trade_signal.symbol, "reversal")
+        position_manager.register_position_close(
+            symbol=trade_signal.symbol,
+            reason="reversal",
+            deal_id=pos.deal_id,
+            source="main_reversal",
+        )
         display_position_reversed(
             f"{pos.direction} {pos.epic} (deal {pos.deal_id})",
             trade_signal.signal.value,
@@ -823,20 +850,25 @@ def _register_verified_results(symbol: str, position_manager: PositionManager) -
 
 def _check_timeouts(
     client,
-    stats: dict,
     position_manager: PositionManager,
-    symbol: str,
-) -> None:
+ ) -> set[str]:
     """Check open positions and close any that exceeded their max hold time."""
     from trade.executor import check_timeouts_unified
 
     max_minutes = SETTINGS.get_max_hold_minutes()
     results = check_timeouts_unified(client)
+    closed_symbols: set[str] = set()
 
     for result in results:
         if result.success:
-            stats["timeout_closed"] = True
-            position_manager.register_closed(symbol, "timeout")
+            closed_symbol = position_manager.canonicalize_symbol(result.epic)
+            position_manager.register_position_close(
+                closed_symbol,
+                "timeout",
+                deal_id=result.deal_id,
+                source="timeout_check",
+            )
+            closed_symbols.add(closed_symbol)
             console.print(
                 f"  [yellow]⏰ Closed[/] {result.direction} {result.epic} "
                 f"[dim](held over {max_minutes} min)[/]"
@@ -845,6 +877,8 @@ def _check_timeouts(
             console.print(
                 f"  [red]✗ Failed to close[/] {result.epic}: {result.error}"
             )
+
+    return closed_symbols
 
 
 def _try_auto_train(symbol: str, stats: dict) -> None:
@@ -1003,7 +1037,10 @@ def main() -> None:
     position_manager.sync_positions()
 
     # Create position monitor — tracks TP progress and manages exits
-    position_monitor = PositionMonitor(client)
+    position_monitor = PositionMonitor(
+        client,
+        on_position_closed=position_manager.register_position_close,
+    )
     position_monitor.sync_positions()
 
     if args.loop:
