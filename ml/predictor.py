@@ -20,6 +20,33 @@ logger = logging.getLogger(__name__)
 ML_CONFIG = SETTINGS.ml
 MODEL_DIR = ML_CONFIG.model_dir
 
+# Model types that require an external library.  Checked once at startup
+# so that models whose library is missing are never even attempted.
+_MODEL_LIBRARY_MAP = {
+    "lightgbm": "lightgbm",
+    "xgboost": "xgboost",
+    "catboost": "catboost",
+    "histgbrt": "sklearn.ensemble",  # HistGradientBoosting is part of sklearn
+}
+
+_UNAVAILABLE_MODEL_TYPES: set[str] = set()
+
+
+def _check_model_libraries() -> None:
+    """Populate _UNAVAILABLE_MODEL_TYPES with model types whose library is not installed."""
+    for model_type, module_name in _MODEL_LIBRARY_MAP.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            _UNAVAILABLE_MODEL_TYPES.add(model_type)
+            logger.warning(
+                "ML library '%s' not installed — %s models will be skipped",
+                module_name, model_type,
+            )
+
+
+_check_model_libraries()
+
 
 @dataclass(frozen=True)
 class Prediction:
@@ -45,17 +72,18 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
     from data.database import get_session
     try:
         with get_session() as session:
-            # Get ALL active models for this symbol/timeframe, ordered by AUC
-            candidates = (
-                session.query(MLModelMeta)
-                .filter(
-                    MLModelMeta.symbol == symbol,
-                    MLModelMeta.timeframe == timeframe,
-                    MLModelMeta.is_active == True,
-                )
-                .order_by(MLModelMeta.roc_auc.desc())
-                .all()
+            # Get ALL active models for this symbol/timeframe, ordered by AUC.
+            # Exclude model types whose library is not installed (e.g. lightgbm).
+            query = session.query(MLModelMeta).filter(
+                MLModelMeta.symbol == symbol,
+                MLModelMeta.timeframe == timeframe,
+                MLModelMeta.is_active == True,
             )
+            if _UNAVAILABLE_MODEL_TYPES:
+                query = query.filter(
+                    MLModelMeta.model_type.notin_(_UNAVAILABLE_MODEL_TYPES)
+                )
+            candidates = query.order_by(MLModelMeta.roc_auc.desc()).all()
 
             if not candidates:
                 return None
