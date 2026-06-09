@@ -797,7 +797,13 @@ def update_position_sl_tp_unified(
 
 
 def check_timeouts_unified(client) -> list[CloseResult]:
-    """Check position timeouts for the current platform."""
+    """Check position timeouts for the current platform.
+
+    Returns empty list if position timeout is disabled via .env.
+    """
+    if not SETTINGS.position_timeout_enabled:
+        logger.debug("Position timeout disabled — skipping timeout check")
+        return []
     if SETTINGS.trading_platform == TradingPlatform.MT5:
         return mt5_check_timeouts(client)
     else:

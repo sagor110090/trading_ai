@@ -321,6 +321,10 @@ class Settings:
     })
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
+    # Position timeout: force-close trades that exceed max hold time
+    position_timeout_enabled: bool = True
+    # Override max hold minutes (0 = use trade mode default: scalping=30, day=240, swing=1440)
+    position_timeout_minutes: int = 0
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
     broker_spread_pips: float = 0.0  # Broker execution speed/spread buffer in pips
     # Per-symbol SL/TP multipliers (fallback to trade mode defaults)
@@ -364,7 +368,13 @@ class Settings:
         return self.ml.prediction_thresholds.get(symbol, self.ml.prediction_thresholds.get("DEFAULT", 0.3))
 
     def get_max_hold_minutes(self) -> int:
-        """Get max hold time in minutes for the current trade mode."""
+        """Get max hold time in minutes for the current trade mode.
+
+        If POSITION_TIMEOUT_MINUTES is set (>0) in .env, it overrides the
+        trade-mode default. Otherwise falls back to the mode-specific value.
+        """
+        if self.position_timeout_minutes > 0:
+            return self.position_timeout_minutes
         if self.trade_mode == TradeMode.SCALPING:
             return self.scalping.max_hold_minutes
         elif self.trade_mode == TradeMode.DAY_TRADING:
@@ -460,6 +470,10 @@ def load_settings() -> Settings:
 
     auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
 
+    # Position timeout settings
+    position_timeout_enabled = os.getenv("POSITION_TIMEOUT_ENABLED", "true").lower() == "true"
+    position_timeout_minutes = int(os.getenv("POSITION_TIMEOUT_MINUTES", "0"))
+
     # Read all TRADE_SIZE_<SYMBOL> from env
     trade_sizes = {"DEFAULT": float(os.getenv("TRADE_SIZE_DEFAULT", "0.01"))}
     for key, value in os.environ.items():
@@ -553,6 +567,8 @@ def load_settings() -> Settings:
         max_positions_per_group=max_positions_per_group,
         trade_mode=trade_mode,
         auto_trade=auto_trade,
+        position_timeout_enabled=position_timeout_enabled,
+        position_timeout_minutes=position_timeout_minutes,
         trade_sizes=trade_sizes,
         sl_multipliers=sl_multipliers,
         tp_multipliers=tp_multipliers,

@@ -445,7 +445,7 @@ def run_signal_cycle(
 
     # Timeout checks must run once per cycle, not once per symbol, otherwise
     # a single broker close can be processed multiple times under the wrong key.
-    if SETTINGS.auto_trade:
+    if SETTINGS.auto_trade and SETTINGS.position_timeout_enabled:
         timeout_closed_symbols = _check_timeouts(client, position_manager)
 
     # NOTE: Position-monitor display is handled by the background
