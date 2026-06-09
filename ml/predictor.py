@@ -37,10 +37,12 @@ def _check_model_libraries() -> None:
     for model_type, module_name in _MODEL_LIBRARY_MAP.items():
         try:
             __import__(module_name)
-        except ImportError:
+        except (ImportError, OSError):
+            # ImportError: package not installed
+            # OSError: package installed but native DLL missing (e.g. lightgbm)
             _UNAVAILABLE_MODEL_TYPES.add(model_type)
             logger.warning(
-                "ML library '%s' not installed — %s models will be skipped",
+                "ML library '%s' not importable — %s models will be skipped",
                 module_name, model_type,
             )
 
