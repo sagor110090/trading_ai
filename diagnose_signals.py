@@ -20,7 +20,7 @@ from rich.panel import Panel
 from config.settings import SETTINGS, Symbol, Timeframe, TradeMode, SignalType
 from data.database import get_session
 from data.models import Candle
-from indicators.features import compute_all_features, extract_feature_set
+from indicators.features import compute_all_features, extract_feature_set_with_lags
 from signals.scoring import compute_signal_scores
 
 console = Console()
@@ -88,7 +88,7 @@ def analyze_symbol(symbol_str: str):
         # Get direction for each timeframe
         def get_direction(df, last_row):
             """Get direction and scores for a timeframe."""
-            features = extract_feature_set(df, len(df) - 1)
+            features = extract_feature_set_with_lags(df, len(df) - 1)
 
             scores, direction = compute_signal_scores(
                 ema20=features.ema20 or 0,

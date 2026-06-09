@@ -13,7 +13,7 @@ import pandas as pd
 from config.settings import SETTINGS
 from data.models import MLModelMeta
 from indicators.features import FeatureSet
-from ml.dataset import SESSION_CATEGORIES, SESSION_ENC_COL
+from ml.dataset import SESSION_CATEGORIES, SESSION_ENC_COL, TRADE_MODES
 from signals.engine import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -189,6 +189,11 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         for cat in SESSION_CATEGORIES:
             features[f"session_{cat.lower()}"] = 1 if session == cat else 0
 
+    # Encode trade_mode with one-hot encoding
+    trade_mode = getattr(signal, "trade_mode", "") or ""
+    for mode in TRADE_MODES:
+        features[f"mode_{mode}"] = 1 if trade_mode == mode else 0
+
     # Build DataFrame with correct feature order
     if feature_cols:
         row = {}
@@ -205,8 +210,9 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         "macd_histogram": 0.0, "momentum_score": 0.0, "trend_strength": 0.0,
         "dist_ema20": 0.0, "dist_ema50": 0.0, "dist_ema200": 0.0,
         "candle_body_pct": 0.0, "upper_wick_pct": 0.0, "lower_wick_pct": 0.0,
-        "spread": 0.0,
+        "spread": 0.0, "atr_ratio": 1.0,
         "session_asian": 0, "session_london": 0, "session_new_york": 0,
+        "mode_scalping": 0, "mode_day_trading": 0, "mode_swing": 0,
     }
     for col, default in PREDICT_NAN_DEFAULTS.items():
         if col in X.columns:

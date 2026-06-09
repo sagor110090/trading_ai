@@ -16,6 +16,14 @@ from indicators.atr import add_atr_column
 logger = logging.getLogger(__name__)
 
 
+# Columns for which lag features are computed (1, 2, 3 candles back)
+LAG_COLUMNS = ["rsi14", "macd_histogram", "momentum_score", "trend_strength", "dist_ema200"]
+LAG_PERIODS = [1, 2, 3]
+
+# All lag feature column names (e.g., "rsi14_lag1", "rsi14_lag2", ...)
+LAG_FEATURE_COLS = [f"{col}_lag{lag}" for col in LAG_COLUMNS for lag in LAG_PERIODS]
+
+
 @dataclass(frozen=True)
 class FeatureSet:
     """Immutable snapshot of all features for a single candle."""
@@ -37,6 +45,24 @@ class FeatureSet:
     momentum_score: Optional[float]
     session: Optional[str]
     spread: Optional[float]
+    # Lag features (previous candle values for temporal context)
+    rsi14_lag1: Optional[float] = None
+    rsi14_lag2: Optional[float] = None
+    rsi14_lag3: Optional[float] = None
+    macd_histogram_lag1: Optional[float] = None
+    macd_histogram_lag2: Optional[float] = None
+    macd_histogram_lag3: Optional[float] = None
+    momentum_score_lag1: Optional[float] = None
+    momentum_score_lag2: Optional[float] = None
+    momentum_score_lag3: Optional[float] = None
+    trend_strength_lag1: Optional[float] = None
+    trend_strength_lag2: Optional[float] = None
+    trend_strength_lag3: Optional[float] = None
+    dist_ema200_lag1: Optional[float] = None
+    dist_ema200_lag2: Optional[float] = None
+    dist_ema200_lag3: Optional[float] = None
+    # Volatility regime indicator: current ATR relative to its rolling mean
+    atr_ratio: Optional[float] = None
 
     def to_dict(self) -> dict:
         return {
@@ -58,6 +84,23 @@ class FeatureSet:
             "momentum_score": self.momentum_score,
             "session": self.session,
             "spread": self.spread,
+            # Lag features
+            "rsi14_lag1": self.rsi14_lag1,
+            "rsi14_lag2": self.rsi14_lag2,
+            "rsi14_lag3": self.rsi14_lag3,
+            "macd_histogram_lag1": self.macd_histogram_lag1,
+            "macd_histogram_lag2": self.macd_histogram_lag2,
+            "macd_histogram_lag3": self.macd_histogram_lag3,
+            "momentum_score_lag1": self.momentum_score_lag1,
+            "momentum_score_lag2": self.momentum_score_lag2,
+            "momentum_score_lag3": self.momentum_score_lag3,
+            "trend_strength_lag1": self.trend_strength_lag1,
+            "trend_strength_lag2": self.trend_strength_lag2,
+            "trend_strength_lag3": self.trend_strength_lag3,
+            "dist_ema200_lag1": self.dist_ema200_lag1,
+            "dist_ema200_lag2": self.dist_ema200_lag2,
+            "dist_ema200_lag3": self.dist_ema200_lag3,
+            "atr_ratio": self.atr_ratio,
         }
 
 
@@ -212,6 +255,12 @@ def compute_all_features(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
 
+    # ATR ratio: current ATR relative to its rolling mean (volatility regime)
+    # Values >1.5 = fast market, <0.7 = quiet market, ~1.0 = normal
+    atr_ma = df["atr14"].rolling(14, min_periods=5).mean()
+    df["atr_ratio"] = df["atr14"] / atr_ma.replace(0, float("nan"))
+    df["atr_ratio"] = df["atr_ratio"].fillna(1.0)  # Default: normal volatility
+
     # Session classification
     df["session"] = df["timestamp"].apply(_determine_session)
 
@@ -219,7 +268,10 @@ def compute_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def extract_feature_set(df: pd.DataFrame, idx: int) -> FeatureSet:
-    """Extract a FeatureSet from a specific row index of the feature DataFrame."""
+    """Extract a FeatureSet from a specific row index of the feature DataFrame.
+
+    Does NOT include lag features — use extract_feature_set_with_lags() for that.
+    """
     row = df.iloc[idx]
     return FeatureSet(
         ema20=_safe_float(row, "ema20"),
@@ -240,7 +292,37 @@ def extract_feature_set(df: pd.DataFrame, idx: int) -> FeatureSet:
         momentum_score=_safe_float(row, "momentum_score"),
         session=_safe_str(row, "session"),
         spread=_safe_float(row, "spread"),
+        atr_ratio=_safe_float(row, "atr_ratio"),
     )
+
+
+def extract_feature_set_with_lags(df: pd.DataFrame, idx: int) -> FeatureSet:
+    """Extract a FeatureSet with lag features from a feature DataFrame.
+
+    Lag features capture the value of key indicators 1, 2, and 3 candles
+    before the current one, giving the model temporal context.
+
+    Args:
+        df: Feature DataFrame (must have at least 4 rows before idx).
+        idx: Row index to extract features for.
+
+    Returns:
+        FeatureSet with lag fields populated from previous candles.
+    """
+    feat = extract_feature_set(df, idx)
+
+    # Extract lag features from previous candles
+    lag_fields = {}
+    for col in LAG_COLUMNS:
+        for lag in LAG_PERIODS:
+            key = f"{col}_lag{lag}"
+            if idx - lag >= 0 and col in df.columns:
+                val = df.iloc[idx - lag].get(col)
+                lag_fields[key] = float(val) if pd.notna(val) else None
+            else:
+                lag_fields[key] = None
+
+    return FeatureSet(**{**feat.to_dict(), **lag_fields})
 
 
 def _safe_float(row: pd.Series, col: str) -> Optional[float]:

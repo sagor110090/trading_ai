@@ -93,6 +93,8 @@ def create_tables() -> None:
     # so we add them manually with existence checks.
     _migrations = [
         ("trade_log", "original_stop_loss", "FLOAT"),
+        ("signals", "atr_ratio", "FLOAT"),
+        ("signals", "trade_mode", "VARCHAR(20)"),
     ]
     with engine.connect() as conn:
         for table, column, col_type in _migrations:

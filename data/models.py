@@ -84,6 +84,8 @@ class Signal(Base):
     momentum_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     session: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     spread: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    atr_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    trade_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     # Verification relationship
     verification: Mapped[Optional["SignalVerification"]] = relationship(

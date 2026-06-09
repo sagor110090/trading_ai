@@ -201,6 +201,8 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
             momentum_score=features.get("momentum_score"),
             session=features.get("session"),
             spread=features.get("spread"),
+            atr_ratio=features.get("atr_ratio"),
+            trade_mode=trade_signal.trade_mode,
         )
 
         session.add(signal)

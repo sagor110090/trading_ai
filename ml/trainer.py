@@ -142,6 +142,50 @@ _TRAINERS = {
 }
 
 
+def _log_feature_importance(model, model_type: str, feature_names: list[str]) -> None:
+    """Extract and log feature importance from a trained model.
+
+    Warns about features with near-zero importance (< 1% of total).
+    """
+    try:
+        if model_type == "xgboost":
+            importances = model.feature_importances_
+        elif model_type == "catboost":
+            importances = model.feature_importances_
+        elif model_type == "histgbrt":
+            if hasattr(model, "feature_importances_"):
+                importances = model.feature_importances_
+            else:
+                logger.info("HistGradientBoosting: feature_importances_ not available")
+                return
+        else:
+            return
+
+        total = sum(importances)
+        if total == 0:
+            return
+
+        importance_dict = {
+            name: float(imp / total)
+            for name, imp in zip(feature_names, importances)
+        }
+        sorted_imp = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+
+        # Log top 10 features
+        top_10 = ", ".join(f"{k}:{v:.3f}" for k, v in sorted_imp[:10])
+        logger.info("Top features for %s: %s", model_type, top_10)
+
+        # Warn about near-zero features
+        low_importance = [k for k, v in importance_dict.items() if v < 0.01]
+        if low_importance:
+            logger.warning(
+                "Low importance features in %s (<1%%): %s",
+                model_type, low_importance,
+            )
+    except Exception as e:
+        logger.warning("Failed to log feature importance for %s: %s", model_type, e)
+
+
 def train_models(
     symbol: str,
     timeframe: Optional[str],
@@ -239,6 +283,9 @@ def train_models(
             model_type, metrics.accuracy, metrics.precision,
             metrics.recall, metrics.f1, metrics.roc_auc,
         )
+
+        # Log feature importance
+        _log_feature_importance(model, model_type, list(X_train.columns))
 
     return results
 

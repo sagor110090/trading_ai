@@ -15,7 +15,7 @@ import pandas as pd
 from config.settings import (
     SETTINGS, SignalType, Symbol, Timeframe, TradeMode,
 )
-from indicators.features import FeatureSet, compute_all_features, extract_feature_set
+from indicators.features import FeatureSet, compute_all_features, extract_feature_set_with_lags
 from signals.scoring import FactorScores, compute_signal_scores
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def _get_direction_from_df(df: pd.DataFrame) -> tuple[SignalType, FactorScores, 
     df_features = compute_all_features(df)
     idx = len(df_features) - 1
     row = df_features.iloc[idx]
-    features = extract_feature_set(df_features, idx)
+    features = extract_feature_set_with_lags(df_features, idx)
 
     if pd.isna(row.get("ema200")):
         return SignalType.NO_TRADE, FactorScores(0, 0, 0, 0, 0, 0, 0), features, row["close"]

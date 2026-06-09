@@ -10,6 +10,7 @@ from sqlalchemy import text
 from config.settings import SignalResult
 from data.database import get_engine
 from data.models import Signal, SignalVerification
+from indicators.features import LAG_COLUMNS, LAG_PERIODS, LAG_FEATURE_COLS
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ FEATURE_COLUMNS = [
     "upper_wick_pct",
     "lower_wick_pct",
     "spread",
+    "atr_ratio",
 ]
 
 SESSION_CATEGORIES = ["ASIAN", "LONDON", "NEW_YORK"]
@@ -38,6 +40,9 @@ SESSION_CATEGORIES = ["ASIAN", "LONDON", "NEW_YORK"]
 SESSION_FEATURE_COLS = [f"session_{cat.lower()}" for cat in SESSION_CATEGORIES]
 # Legacy column name for backward compatibility with old models
 SESSION_ENC_COL = "session_enc"
+
+TRADE_MODES = ["scalping", "day_trading", "swing"]
+MODE_FEATURE_COLS = [f"mode_{m}" for m in TRADE_MODES]
 
 TARGET_COLUMN = "win"
 
@@ -58,6 +63,7 @@ NAN_DEFAULTS = {
     "upper_wick_pct": 0.0,
     "lower_wick_pct": 0.0,
     "spread": 0.0,
+    "atr_ratio": 1.0,       # Normal volatility (neutral default)
     "session_asian": 0,
     "session_london": 0,
     "session_new_york": 0,
@@ -95,7 +101,7 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
             s.trend_strength, s.momentum_score,
             s.dist_ema20, s.dist_ema50, s.dist_ema200,
             s.candle_body_pct, s.upper_wick_pct, s.lower_wick_pct,
-            s.session, s.spread,
+            s.session, s.spread, s.atr_ratio, s.trade_mode,
             v.result,
             v.profit_points,
             v.risk_reward,
@@ -135,6 +141,15 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     for cat in SESSION_CATEGORIES:
         df[f"session_{cat.lower()}"] = (df["session"] == cat).astype(int)
 
+    # Encode trade_mode with one-hot encoding
+    if "trade_mode" in df.columns:
+        for mode in TRADE_MODES:
+            df[f"mode_{mode}"] = (df["trade_mode"] == mode).astype(int)
+    else:
+        # Fallback: no trade_mode column (old data)
+        for mode in TRADE_MODES:
+            df[f"mode_{mode}"] = 0
+
     # Drop rows where critical indicators are NaN (early candles without enough
     # history). These produce garbage values for dist_ema* when filled to 0.
     rows_before = len(df)
@@ -159,10 +174,25 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
                 # be clean after the DROP_IF_NaN pass, but fill any stragglers
                 df[col] = df[col].fillna(0)
 
+    # Add lag features (1, 2, 3 candles back) for key indicators.
+    # These give the model temporal context — e.g., "RSI was 30 three candles
+    # ago and is now 50" vs "RSI was 70 three candles ago and is now 50".
+    df = _add_lag_features(df)
+
+    # Compute ATR ratio (volatility regime indicator) from stored atr14 values.
+    # Values >1.5 = fast market, <0.7 = quiet, ~1.0 = normal.
+    if "atr14" in df.columns:
+        atr_ma = df["atr14"].rolling(14, min_periods=5).mean()
+        df["atr_ratio"] = df["atr14"] / atr_ma.replace(0, float("nan"))
+        df["atr_ratio"] = df["atr_ratio"].fillna(1.0)
+
+    # All feature columns including lag features
+    all_feature_cols = FEATURE_COLUMNS + LAG_FEATURE_COLS + SESSION_FEATURE_COLS
+
     logger.info(
         "Built dataset: %d rows, %d features, win rate=%.1f%%",
         len(df),
-        len(feature_cols),
+        len(all_feature_cols),
         df[TARGET_COLUMN].mean() * 100,
     )
 
@@ -171,10 +201,42 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
 
 def split_features_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     """Split dataset into feature matrix X and target vector y."""
-    feature_cols = FEATURE_COLUMNS + SESSION_FEATURE_COLS
+    feature_cols = FEATURE_COLUMNS + LAG_FEATURE_COLS + SESSION_FEATURE_COLS + MODE_FEATURE_COLS
     available = [c for c in feature_cols if c in df.columns]
 
     X = df[available].copy()
     y = df[TARGET_COLUMN].copy()
 
     return X, y
+
+
+def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add lag features (1, 2, 3 candles back) for key indicators.
+
+    Lags are computed within each (symbol) group to prevent cross-contamination.
+    Rows where lag values are NaN (first few rows per group) are dropped.
+
+    Must be called AFTER sorting by timestamp and AFTER filling NaN values.
+    """
+    if df.empty or "symbol" not in df.columns:
+        return df
+
+    # Ensure sorted by timestamp within each symbol
+    df = df.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+    # Compute lag features per symbol group
+    for symbol, group_idx in df.groupby("symbol").groups.items():
+        for col in LAG_COLUMNS:
+            if col not in df.columns:
+                continue
+            for lag in LAG_PERIODS:
+                lag_col = f"{col}_lag{lag}"
+                df.loc[group_idx, lag_col] = df.loc[group_idx, col].shift(lag)
+
+    # Fill lag NaNs with 0 (first few rows per group where shift creates NaN).
+    # For lag features, 0 means "no previous data" which is a reasonable neutral.
+    for col_name in LAG_FEATURE_COLS:
+        if col_name in df.columns:
+            df[col_name] = df[col_name].fillna(0)
+
+    return df
