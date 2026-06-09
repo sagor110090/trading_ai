@@ -19,7 +19,7 @@ import pandas as pd
 # Direct imports from flat structure
 from ml.dataset import build_dataset, split_features_target
 from ml.trainer import train_models
-from data.database import get_session
+from data.database import create_tables, get_session
 from data.models import Signal
 
 logging.basicConfig(
@@ -52,6 +52,9 @@ def retrain_models(symbols=None, model_types=None):
     logger.info(f"Retraining models for: {symbols}")
     logger.info(f"Model types: {model_types}")
     logger.info("=" * 60)
+
+    # Run DB migrations (adds new columns like atr_ratio, trade_mode)
+    create_tables()
 
     all_results = {}
 
