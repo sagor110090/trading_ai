@@ -35,14 +35,18 @@ class Prediction:
 def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
     """Load the best active model for a symbol/timeframe.
 
+    Tries models ordered by best AUC first. If loading a model fails
+    (e.g. missing library like lightgbm), it automatically falls back
+    to the next best model instead of giving up entirely.
+
     Returns (model, feature_columns, model_info) or None,
     where model_info is a dict with the model metadata.
     """
     from data.database import get_session
     try:
         with get_session() as session:
-            # Prefer best AUC among active models for this symbol/timeframe
-            meta = (
+            # Get ALL active models for this symbol/timeframe, ordered by AUC
+            candidates = (
                 session.query(MLModelMeta)
                 .filter(
                     MLModelMeta.symbol == symbol,
@@ -50,44 +54,63 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
                     MLModelMeta.is_active == True,
                 )
                 .order_by(MLModelMeta.roc_auc.desc())
-                .first()
+                .all()
             )
 
-            if not meta:
+            if not candidates:
                 return None
 
-            # Extract all needed data while session is open
-            model_info = {
-                "model_type": meta.model_type,
-                "version": meta.version,
-                "filepath": meta.filepath,
-                "accuracy": meta.accuracy,
-                "precision": meta.precision,
-                "recall": meta.recall,
-                "f1": meta.f1,
-                "roc_auc": meta.roc_auc,
-                "train_signal_count": meta.train_signal_count,
-                "trained_at": meta.trained_at,
-            }
+            for meta in candidates:
+                # Extract all needed data while session is open
+                model_info = {
+                    "model_type": meta.model_type,
+                    "version": meta.version,
+                    "filepath": meta.filepath,
+                    "accuracy": meta.accuracy,
+                    "precision": meta.precision,
+                    "recall": meta.recall,
+                    "f1": meta.f1,
+                    "roc_auc": meta.roc_auc,
+                    "train_signal_count": meta.train_signal_count,
+                    "trained_at": meta.trained_at,
+                }
 
-            filepath = model_info["filepath"]
-            # Resolve relative paths against MODEL_DIR
-            if not os.path.isabs(filepath):
-                filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
-            if not os.path.exists(filepath):
-                logger.warning("Model file not found: %s", filepath)
-                return None
+                filepath = model_info["filepath"]
+                # Resolve relative paths against MODEL_DIR
+                if not os.path.isabs(filepath):
+                    filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
+                if not os.path.exists(filepath):
+                    logger.warning("Model file not found: %s — skipping", filepath)
+                    continue
 
-            model = joblib.load(filepath)
+                try:
+                    model = joblib.load(filepath)
+                except Exception as load_err:
+                    logger.warning(
+                        "Failed to load %s model (AUC=%.4f): %s — deactivating and trying next",
+                        meta.model_type, meta.roc_auc, load_err,
+                    )
+                    # Deactivate the broken model so we don't retry it every cycle
+                    try:
+                        meta.is_active = False
+                        session.commit()
+                        logger.info("Deactivated broken %s model for %s", meta.model_type, symbol)
+                    except Exception:
+                        session.rollback()
+                    continue
 
-            feat_path = filepath.replace(".joblib", "_features.json")
-            if os.path.exists(feat_path):
-                with open(feat_path) as f:
-                    feature_cols = json.load(f)
-            else:
-                feature_cols = None
+                feat_path = filepath.replace(".joblib", "_features.json")
+                if os.path.exists(feat_path):
+                    with open(feat_path) as f:
+                        feature_cols = json.load(f)
+                else:
+                    feature_cols = None
 
-            return model, feature_cols, model_info
+                return model, feature_cols, model_info
+
+            # All candidates failed
+            logger.warning("No loadable model found for %s %s", symbol, timeframe)
+            return None
 
     except Exception as e:
         logger.error("Failed to load model: %s", e)
