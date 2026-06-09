@@ -82,7 +82,7 @@ class DriftDetector:
         Args:
             signal_id: Signal identifier
             symbol: Trading symbol
-            model_type: Model type (xgboost, lightgbm, catboost)
+            model_type: Model type (xgboost, histgbrt, catboost)
             model_version: Model version number
             ml_probability: ML prediction probability (0-1)
         """

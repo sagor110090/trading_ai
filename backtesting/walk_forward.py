@@ -367,7 +367,7 @@ def run_walk_forward(
         return []
 
     if model_types is None:
-        model_types = ["xgboost", "lightgbm", "catboost"]
+        model_types = ["xgboost", "histgbrt", "catboost"]
 
     reports = []
 

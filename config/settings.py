@@ -205,18 +205,18 @@ class MLConfig:
         "min_child_weight": 5,
         "eval_metric": "logloss",
     })
-    lightgbm: dict = field(default_factory=lambda: {
-        "n_estimators": 500,
+    histgbrt: dict = field(default_factory=lambda: {
+        "max_iter": 500,
         "max_depth": 6,
         "learning_rate": 0.05,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "reg_alpha": 0.1,
-        "reg_lambda": 1.0,
-        "min_child_samples": 20,
-        "objective": "binary",
-        "metric": "binary_logloss",
-        "verbose": -1,
+        "min_samples_leaf": 20,
+        "l2_regularization": 1.0,
+        "max_bins": 255,
+        "early_stopping": True,
+        "n_iter_no_change": 50,
+        "class_weight": "balanced",
+        "scoring": "roc_auc",
+        "verbose": 0,
     })
     catboost: dict = field(default_factory=lambda: {
         "iterations": 500,

@@ -1,4 +1,4 @@
-"""ML trainer: trains XGBoost, LightGBM, and CatBoost models on verified signal data."""
+"""ML trainer: trains XGBoost, HistGradientBoosting, and CatBoost models on verified signal data."""
 
 import json
 import logging
@@ -71,15 +71,18 @@ def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFram
     }
 
 
-def _train_lightgbm(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
-    """Train LightGBM classifier and return metrics."""
-    from lightgbm import LGBMClassifier
+def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
+    """Train sklearn HistGradientBoosting classifier and return metrics.
 
-    model = LGBMClassifier(**ML_CONFIG.lightgbm)
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-    )
+    Replaces LightGBM — avoids the native DLL dependency issue on Windows
+    while providing the same histogram-based gradient boosting algorithm.
+    Built-in early stopping and class weight support improve performance
+    on imbalanced datasets.
+    """
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    model = HistGradientBoostingClassifier(**ML_CONFIG.histgbrt)
+    model.fit(X_train, y_train, X_val=X_val, y_val=y_val)
     y_pred = model.predict(X_val)
     y_proba = model.predict_proba(X_val)[:, 1]
 
@@ -124,7 +127,7 @@ def _compute_metrics(y_true: pd.Series, y_pred: np.ndarray, y_proba: np.ndarray)
 
 _TRAINERS = {
     "xgboost": _train_xgboost,
-    "lightgbm": _train_lightgbm,
+    "histgbrt": _train_histgbrt,
     "catboost": _train_catboost,
 }
 

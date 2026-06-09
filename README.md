@@ -33,7 +33,7 @@ Self-learning trading prediction system using **multi-symbol support** with both
               │ ML Predictor │────▶│  ≥ Threshold? │
               │ (catboost,   │     └──────┬───────┘
               │  xgboost,    │            │
-              │  lightgbm)   │     ┌──────┴───────┐
+              │  histgbrt)   │     ┌──────┴───────┐
               └──────────────┘     ▼              ▼
                                    APPROVED       BLOCKED
                                       │
@@ -446,7 +446,7 @@ Unique constraint: `(symbol, timeframe, timestamp)`
 
 | Column | Type | Notes |
 |--------|------|-------|
-| model_type | String(50) | xgboost / lightgbm / catboost |
+| model_type | String(50) | xgboost / histgbrt / catboost |
 | symbol / timeframe | String | |
 | version | Integer | Auto-incremented |
 | filepath | Text | Path to .joblib |
@@ -506,7 +506,7 @@ Unique constraint: `(symbol, timeframe, timestamp)`
 | pandas | ≥2.1 | DataFrames |
 | numpy | ≥1.26 | Numerical operations |
 | xgboost | ≥2.0 | XGBoost classifier |
-| lightgbm | ≥4.1 | LightGBM classifier |
+| histgbrt | (sklearn) | HistGradientBoosting classifier (sklearn built-in) |
 | catboost | ≥1.2 | CatBoost classifier |
 | scikit-learn | ≥1.3 | Metrics, resampling |
 | sqlalchemy | ≥2.0 | ORM & database |
@@ -575,7 +575,7 @@ First run on BTCUSD with 4 weeks of M5 data:
 
 🔄 Training ML models on 28 verified signals...
     xgboost     acc=64.3%  auc=0.5000
-    lightgbm    acc=64.3%  auc=0.5000
+    histgbrt    acc=64.3%  auc=0.5333
     catboost    acc=64.3%  auc=0.5333
 ✓ ML models trained!
 ```

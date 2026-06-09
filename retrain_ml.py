@@ -35,10 +35,10 @@ def retrain_models(symbols=None, model_types=None):
 
     Args:
         symbols: List of symbols to train (e.g., ["BTCUSD", "XAUUSD"]). None = all.
-        model_types: List of model types (e.g., ["xgboost", "lightgbm", "catboost"]). None = all.
+        model_types: List of model types (e.g., ["xgboost", "histgbrt", "catboost"]). None = all.
     """
     if model_types is None:
-        model_types = ["xgboost", "lightgbm", "catboost"]
+        model_types = ["xgboost", "histgbrt", "catboost"]
 
     if symbols is None:
         # Get unique symbols from database
@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Retrain ML models with updated config")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to train (e.g., BTCUSD XAUUSD)")
-    parser.add_argument("--models", nargs="+", default=None, help="Model types (e.g., xgboost lightgbm catboost)")
+    parser.add_argument("--models", nargs="+", default=None, help="Model types (e.g., xgboost histgbrt catboost)")
 
     args = parser.parse_args()
 
