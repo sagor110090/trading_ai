@@ -53,14 +53,22 @@ def _ensure_model_dir() -> None:
 
 
 def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
-    """Train XGBoost classifier and return metrics."""
+    """Train XGBoost classifier and return metrics.
+
+    XGBoost requires binary (0/1) targets. BREAKEVEN signals (0.5) are mapped
+    to LOSS (0) since XGBoost doesn't support float targets for classification.
+    """
     from xgboost import XGBClassifier
+
+    # Convert float targets to binary: BREAKEVEN (0.5) → LOSS (0)
+    y_train_binary = (y_train >= 0.5).astype(int)
+    y_val_binary = (y_val >= 0.5).astype(int)
 
     # Dynamically compute scale_pos_weight from training data to handle class
     # imbalance (typically ~70% losses, ~30% wins). This overrides any static
     # value in ML_CONFIG.xgboost.
-    neg_count = int((y_train == 0).sum())
-    pos_count = int((y_train == 1).sum())
+    neg_count = int((y_train_binary == 0).sum())
+    pos_count = int((y_train_binary == 1).sum())
     spw = neg_count / pos_count if pos_count > 0 else 1.0
 
     params = {**ML_CONFIG.xgboost, "scale_pos_weight": spw}
@@ -68,8 +76,8 @@ def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFram
 
     model = XGBClassifier(**params)
     model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
+        X_train, y_train_binary,
+        eval_set=[(X_val, y_val_binary)],
         verbose=False,
     )
     y_pred = model.predict(X_val)
@@ -77,7 +85,7 @@ def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFram
 
     return {
         "model": model,
-        "metrics": _compute_metrics(y_val, y_pred, y_proba),
+        "metrics": _compute_metrics(y_val_binary, y_pred, y_proba),
     }
 
 
@@ -111,9 +119,15 @@ def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFra
 
 
 def _train_catboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
-    """Train CatBoost classifier and return metrics."""
+    """Train CatBoost classifier and return metrics.
+
+    CatBoost supports float targets natively — BREAKEVEN signals (0.5)
+    are kept as partial targets, giving the model a nuanced signal that
+    the outcome was uncertain.
+    """
     from catboost import CatBoostClassifier
 
+    # CatBoost handles float targets for binary classification
     model = CatBoostClassifier(**ML_CONFIG.catboost)
     model.fit(
         X_train, y_train,
@@ -123,12 +137,13 @@ def _train_catboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFra
     y_pred = model.predict(X_val)
     y_proba = model.predict_proba(X_val)[:, 1]
 
-    # CatBoost predict returns float arrays
-    y_pred = y_pred.astype(int)
+    # For metrics, use binary targets (BREAKEVEN 0.5 → WIN for evaluation)
+    y_val_binary = (y_val >= 0.5).astype(int)
+    y_pred_binary = (y_pred >= 0.5).astype(int)
 
     return {
         "model": model,
-        "metrics": _compute_metrics(y_val, y_pred, y_proba),
+        "metrics": _compute_metrics(y_val_binary, y_pred_binary, y_proba),
     }
 
 

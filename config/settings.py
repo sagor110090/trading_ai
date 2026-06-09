@@ -224,6 +224,7 @@ class MLConfig:
         "learning_rate": 0.05,
         "l2_leaf_reg": 3.0,
         "subsample": 0.8,
+        "bootstrap_type": "Bernoulli",
         "eval_metric": "Logloss",
         "verbose": 0,
         # Auto class weights to handle imbalance (70% losses, 30% wins)
