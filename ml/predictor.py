@@ -13,6 +13,7 @@ import pandas as pd
 from config.settings import SETTINGS
 from data.models import MLModelMeta
 from indicators.features import FeatureSet
+from ml.dataset import SESSION_CATEGORIES, SESSION_ENC_COL
 from signals.engine import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -176,11 +177,17 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     # Build feature vector from signal's feature snapshot
     features = signal.features.to_dict()
 
-    # Encode session
-    session_encoding = {"ASIAN": 0, "LONDON": 1, "NEW_YORK": 2}
-    features["session_enc"] = session_encoding.get(features.get("session", ""), -1)
-    # Remove string session
-    features.pop("session", None)
+    # Encode session — backward compatible with old models
+    # Old models use ordinal "session_enc"; new models use one-hot "session_*"
+    session = features.pop("session", None) or ""
+    if feature_cols and SESSION_ENC_COL in feature_cols:
+        # Legacy model: ordinal encoding
+        session_encoding = {"ASIAN": 0, "LONDON": 1, "NEW_YORK": 2}
+        features[SESSION_ENC_COL] = session_encoding.get(session, -1)
+    else:
+        # New model: one-hot encoding
+        for cat in SESSION_CATEGORIES:
+            features[f"session_{cat.lower()}"] = 1 if session == cat else 0
 
     # Build DataFrame with correct feature order
     if feature_cols:
@@ -191,7 +198,21 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     else:
         X = pd.DataFrame([features])
 
-    # Replace any remaining NaN/None
+    # Replace NaN/None with per-column neutral defaults (for live prediction
+    # we can't drop rows, so we use sensible fill values).
+    PREDICT_NAN_DEFAULTS = {
+        "rsi14": 50.0, "macd_line": 0.0, "macd_signal": 0.0,
+        "macd_histogram": 0.0, "momentum_score": 0.0, "trend_strength": 0.0,
+        "dist_ema20": 0.0, "dist_ema50": 0.0, "dist_ema200": 0.0,
+        "candle_body_pct": 0.0, "upper_wick_pct": 0.0, "lower_wick_pct": 0.0,
+        "spread": 0.0,
+        "session_asian": 0, "session_london": 0, "session_new_york": 0,
+    }
+    for col, default in PREDICT_NAN_DEFAULTS.items():
+        if col in X.columns:
+            X[col] = X[col].fillna(default)
+    # EMA/ATR columns: fill remaining NaN with 0 (signal data should not be
+    # NaN at prediction time, but guard against it)
     X = X.fillna(0.0)
     X = X.replace([np.inf, -np.inf], 0.0)
 

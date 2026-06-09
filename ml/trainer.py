@@ -56,7 +56,17 @@ def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFram
     """Train XGBoost classifier and return metrics."""
     from xgboost import XGBClassifier
 
-    model = XGBClassifier(**ML_CONFIG.xgboost)
+    # Dynamically compute scale_pos_weight from training data to handle class
+    # imbalance (typically ~70% losses, ~30% wins). This overrides any static
+    # value in ML_CONFIG.xgboost.
+    neg_count = int((y_train == 0).sum())
+    pos_count = int((y_train == 1).sum())
+    spw = neg_count / pos_count if pos_count > 0 else 1.0
+
+    params = {**ML_CONFIG.xgboost, "scale_pos_weight": spw}
+    logger.info("XGBoost: scale_pos_weight=%.2f (neg=%d, pos=%d)", spw, neg_count, pos_count)
+
+    model = XGBClassifier(**params)
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],

@@ -1,13 +1,15 @@
 """ML drift detection: monitors model performance degradation over time.
 
-Tracks prediction vs actual outcomes and alerts when win rate drops
-significantly below training performance (ROC AUC).
+Tracks prediction vs actual outcomes and alerts when actual win rate diverges
+significantly from the model's average predicted probability (calibration drift).
 """
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+import numpy as np
 
 from config.settings import SETTINGS
 from data.database import get_session
@@ -118,7 +120,14 @@ class DriftDetector:
                 break
 
     def check_drift(self, symbol: str) -> Optional[DriftReport]:
-        """Check if model has drifted for a symbol.
+        """Check if model predictions have drifted from training performance.
+
+        Compares the average predicted probability (model calibration) against
+        the actual win rate. If the model says 60% of trades should win but only
+        40% do, it is miscalibrated and drift is detected.
+
+        This replaces the old approach of comparing win rate against AUC, which
+        was mathematically incorrect (AUC measures ranking ability, not calibration).
 
         Args:
             symbol: Trading symbol to check
@@ -157,30 +166,30 @@ class DriftDetector:
         if len(recent_predictions) < self.min_predictions:
             return None
 
-        # Calculate recent win rate
+        # Calculate actual win rate
         wins = sum(1 for t in recent_predictions if t.actual_outcome == "WIN")
         recent_win_rate = wins / len(recent_predictions)
 
-        # Expected win rate based on training AUC (simplified)
-        # AUC 0.7 ~ 70% expected win rate in similar conditions
-        expected_win_rate = training_auc
+        # Calculate average predicted probability of WIN across tracked predictions.
+        # This tests calibration: "the model said 60% would win — did they?"
+        avg_predicted_prob = np.mean([t.ml_probability for t in recent_predictions])
 
-        # Check for drift
-        drift_detected = recent_win_rate < (expected_win_rate - self.drift_threshold)
-        drift_percentage = (expected_win_rate - recent_win_rate) * 100
+        # Check for drift: actual win rate diverges from average predicted probability
+        drift_detected = recent_win_rate < (avg_predicted_prob - self.drift_threshold)
+        drift_percentage = (avg_predicted_prob - recent_win_rate) * 100
 
         if drift_detected:
             message = (
                 f"⚠️ DRIFT DETECTED: {symbol} {model_type}\n"
-                f"   Training AUC: {training_auc:.2%}\n"
+                f"   Avg predicted prob: {avg_predicted_prob:.2%}\n"
                 f"   Recent win rate: {recent_win_rate:.2%} ({len(recent_predictions)} trades)\n"
-                f"   Drift: {drift_percentage:.1f}% below expected"
+                f"   Calibration gap: {drift_percentage:.1f}% below expected"
             )
             logger.warning(message)
         else:
             message = (
                 f"✓ {symbol} {model_type}: No drift\n"
-                f"   Training AUC: {training_auc:.2%}\n"
+                f"   Avg predicted prob: {avg_predicted_prob:.2%}\n"
                 f"   Recent win rate: {recent_win_rate:.2%} ({len(recent_predictions)} trades)"
             )
 

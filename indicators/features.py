@@ -161,12 +161,13 @@ def _momentum_score(rsi: float, macd_hist: float, close: float, ema20: float) ->
     rsi_component = (rsi - 50.0) * 0.8
     score += np.clip(rsi_component, -40.0, 40.0)
 
-    # MACD histogram direction
+    # MACD histogram direction and magnitude (tanh squash preserves magnitude)
     if not pd.isna(macd_hist):
-        if macd_hist > 0:
-            score += min(macd_hist / (abs(macd_hist) + 1e-9) * 30.0, 30.0)
-        else:
-            score += max(macd_hist / (abs(macd_hist) + 1e-9) * 30.0, -30.0)
+        # tanh maps real line to (-1, 1); dividing by 2.0 means a histogram of
+        # ±2.0 reaches ~76% of the max component. This preserves magnitude
+        # instead of the old bug where any non-zero value got ±30.
+        macd_component = np.tanh(macd_hist / 2.0) * 30.0
+        score += macd_component
 
     # Price momentum vs EMA20
     if not pd.isna(ema20) and ema20 > 0:

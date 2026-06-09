@@ -90,10 +90,10 @@ def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float
     max_score = WEIGHTS.macd
     score = 0.0
 
-    # Histogram direction and magnitude
+    # Histogram direction and magnitude (tanh squash preserves magnitude)
     hist_abs = abs(macd_hist)
     if hist_abs > 0:
-        magnitude = min(hist_abs / (hist_abs + 1e-9), 1.0)
+        magnitude = np.tanh(hist_abs / 2.0)
         score = max_score * 0.6 * magnitude
 
     # Crossover bonus
