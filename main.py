@@ -659,23 +659,14 @@ def run_signal_cycle(
                     if prediction:
                         stats["ml_prediction"] = prediction
                         threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
-                        hard_block = SETTINGS.ml.hard_block_threshold
 
-                        if prediction.probability < hard_block:
-                            # Hard block: ML strongly disagrees
+                        if prediction.probability < threshold:
+                            # Below threshold: ML disagrees, block the trade
                             should_trade = False
                             stats["ml_blocked"] = True
-                            stats["ml_block_reason"] = "hard_block"
-                            display_ml_prediction(prediction, threshold, zone="hard_block")
-                        elif prediction.probability < threshold:
-                            # Soft zone: ML is uncertain, trade proceeds with
-                            # reduced confidence multiplier for position sizing
-                            confidence_multiplier = prediction.probability / threshold
-                            stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
-                            stats["ml_soft_block"] = True
-                            display_ml_prediction(prediction, threshold, zone="soft")
+                            display_ml_prediction(prediction, threshold, zone="blocked")
                         else:
-                            # Approved: ML agrees with the signal
+                            # Above threshold: ML agrees with the signal
                             stats["ml_approved"] = True
                             display_ml_prediction(prediction, threshold, zone="approved")
 
@@ -730,21 +721,12 @@ def run_signal_cycle(
                 if prediction:
                     stats["ml_prediction"] = prediction
                     threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
-                    hard_block = SETTINGS.ml.hard_block_threshold
 
-                    if prediction.probability < hard_block:
-                        # Hard block: ML strongly disagrees
+                    if prediction.probability < threshold:
+                        # Below threshold: ML disagrees, block the trade
                         should_trade = False
                         stats["ml_blocked"] = True
-                        stats["ml_block_reason"] = "hard_block"
-                        display_ml_prediction(prediction, threshold, zone="hard_block")
-                    elif prediction.probability < threshold:
-                        # Soft zone: ML is uncertain, trade proceeds with
-                        # reduced confidence multiplier for position sizing
-                        confidence_multiplier = prediction.probability / threshold
-                        stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
-                        stats["ml_soft_block"] = True
-                        display_ml_prediction(prediction, threshold, zone="soft")
+                        display_ml_prediction(prediction, threshold, zone="blocked")
                     else:
                         # Approved: ML agrees with the signal
                         stats["ml_approved"] = True
