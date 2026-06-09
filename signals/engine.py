@@ -267,14 +267,14 @@ def generate_signal_day_trading(
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Day trading signal: M5 entry in H1 trend direction, H4 must not contradict.
+    """Day trading signal: M5 entry in H1 trend direction, H4 as confirmation.
 
     Rules:
     - H1 provides trend direction
-    - H4 must NOT oppose (H4 opposite = blocked)
+    - H4 opposition penalises confidence (no longer hard-blocks)
     - M5 momentum must agree for entry timing
     - Medium stops: 1x ATR SL, 1.5x ATR TP
-    - Threshold: 35%
+    - Threshold: 20%
     """
     cfg = SETTINGS.day_trading
 
@@ -300,32 +300,39 @@ def generate_signal_day_trading(
         logger.info("Day trade: H1 NO_TRADE")
         return None
 
-    # H4 must not oppose H1
+    # H4 opposition penalises confidence instead of hard-blocking.
+    # This allows signals during trend transitions (H4 pullback vs H1 bounce)
+    # while still penalising counter-big-picture trades.
+    h4_penalty = 0.0
+    h4_opposes = False
     if h4_dir != SignalType.NO_TRADE and h4_dir != h1_dir:
-        logger.info("Day trade: H4=%s opposes H1=%s — blocked", h4_dir.value, h1_dir.value)
-        return None
+        h4_penalty = -12.0
+        h4_opposes = True
+        logger.info("Day trade: H4=%s opposes H1=%s — penalty -12%%", h4_dir.value, h1_dir.value)
 
     # M5 must agree or be neutral
     if m5_dir != SignalType.NO_TRADE and m5_dir != h1_dir:
-        confluence_penalty = -8.0
+        m5_penalty = -8.0
     else:
-        confluence_penalty = 0.0
+        m5_penalty = 0.0
 
     base_confidence = min(h1_scores.total / WEIGHTS.total * 100.0, 100.0)
     confluence_bonus = 0.0
     confluence_label = cfg.confluence_label
 
-    # H4 alignment bonus
+    # H4 alignment bonus or opposition label
     if h4_dir == h1_dir and h4_dir != SignalType.NO_TRADE:
         confluence_bonus += 8.0
         confluence_label = f"{cfg.confluence_label}+h4"
+    elif h4_opposes:
+        confluence_label = f"{cfg.confluence_label}_vs_h4"
 
     # M5 alignment bonus
     if m5_dir == h1_dir:
         confluence_bonus += 6.0
         confluence_label = f"{confluence_label}+m5"
 
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + confluence_penalty))
+    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + h4_penalty + m5_penalty))
 
     if confidence < cfg.confidence_threshold:
         logger.info("Day trade: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
@@ -368,14 +375,14 @@ def generate_signal_swing(
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Swing signal: H4+H1 must agree, M5 entry trigger.
+    """Swing signal: H4+H1 alignment, M5 entry trigger.
 
     Rules:
     - H4 = trend direction (the boss)
-    - H1 must confirm H4 direction
+    - H1 opposition penalises confidence (heavier penalty than day trade)
     - M5 supports entry timing
     - Wide stops: 2x ATR SL, 3x ATR TP
-    - Threshold: 40%
+    - Threshold: 25%
     """
     cfg = SETTINGS.swing
 
@@ -389,24 +396,35 @@ def generate_signal_swing(
 
     logger.info("Swing: H4=%s H1=%s M5=%s", h4_dir.value, h1_dir.value, m5_dir.value)
 
-    # H4 and H1 must both have a direction and agree
+    # H4 and H1 must both have a direction
     if h4_dir == SignalType.NO_TRADE or h1_dir == SignalType.NO_TRADE:
         logger.info("Swing: H4 or H1 is NO_TRADE")
         return None
 
+    # H4 vs H1 conflict: heavy penalty instead of hard block.
+    # Swing trades need more alignment, so the penalty is larger than day trade.
+    # When they agree, H4 direction is used; when H1 opposes, H1 direction is used
+    # (H1 is the entry timeframe — more relevant for timing).
+    h4_h1_penalty = 0.0
     if h4_dir != h1_dir:
-        logger.info("Swing: H4=%s vs H1=%s — conflicting", h4_dir.value, h1_dir.value)
-        return None
+        h4_h1_penalty = -18.0
+        logger.info("Swing: H4=%s vs H1=%s — penalty -18%%", h4_dir.value, h1_dir.value)
 
-    signal_dir = h4_dir
+    signal_dir = h1_dir  # Use H1 direction (entry timing matters more)
 
     # Confidence calculation
     base_confidence = min(h1_scores.total / WEIGHTS.total * 100.0, 100.0)
     confluence_bonus = 0.0
     confluence_label = f"{cfg.confluence_label}"
 
-    # H4 trend strength bonus
-    if h4_feat.trend_strength is not None and not pd.isna(h4_feat.trend_strength):
+    # H4 alignment label
+    if h4_dir == signal_dir:
+        confluence_label = f"{confluence_label}+h4"
+    elif h4_dir != h1_dir:
+        confluence_label = f"{confluence_label}_vs_h4"
+
+    # H4 trend strength bonus (only when H4 agrees with signal direction)
+    if h4_dir == signal_dir and h4_feat.trend_strength is not None and not pd.isna(h4_feat.trend_strength):
         h4_trend_abs = abs(h4_feat.trend_strength)
         if h4_trend_abs > 60:
             confluence_bonus += 10.0
@@ -421,7 +439,7 @@ def generate_signal_swing(
         confluence_bonus -= 12.0
         confluence_label = f"{confluence_label}_vs_m5"
 
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus))
+    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + h4_h1_penalty))
 
     if confidence < cfg.confidence_threshold:
         logger.info("Swing: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
