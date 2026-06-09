@@ -666,18 +666,18 @@ def run_signal_cycle(
                             should_trade = False
                             stats["ml_blocked"] = True
                             stats["ml_block_reason"] = "hard_block"
-                            display_ml_prediction(prediction, threshold, blocked=True)
+                            display_ml_prediction(prediction, threshold, zone="hard_block")
                         elif prediction.probability < threshold:
                             # Soft zone: ML is uncertain, trade proceeds with
                             # reduced confidence multiplier for position sizing
                             confidence_multiplier = prediction.probability / threshold
                             stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
                             stats["ml_soft_block"] = True
-                            display_ml_prediction(prediction, threshold, blocked=False)
+                            display_ml_prediction(prediction, threshold, zone="soft")
                         else:
                             # Approved: ML agrees with the signal
                             stats["ml_approved"] = True
-                            display_ml_prediction(prediction, threshold, blocked=False)
+                            display_ml_prediction(prediction, threshold, zone="approved")
 
                         # Track prediction for drift detection
                         try:
@@ -737,18 +737,18 @@ def run_signal_cycle(
                         should_trade = False
                         stats["ml_blocked"] = True
                         stats["ml_block_reason"] = "hard_block"
-                        display_ml_prediction(prediction, threshold, blocked=True)
+                        display_ml_prediction(prediction, threshold, zone="hard_block")
                     elif prediction.probability < threshold:
                         # Soft zone: ML is uncertain, trade proceeds with
                         # reduced confidence multiplier for position sizing
                         confidence_multiplier = prediction.probability / threshold
                         stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
                         stats["ml_soft_block"] = True
-                        display_ml_prediction(prediction, threshold, blocked=False)
+                        display_ml_prediction(prediction, threshold, zone="soft")
                     else:
                         # Approved: ML agrees with the signal
                         stats["ml_approved"] = True
-                        display_ml_prediction(prediction, threshold, blocked=False)
+                        display_ml_prediction(prediction, threshold, zone="approved")
 
                     # Track prediction for drift detection
                     try:

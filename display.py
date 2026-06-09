@@ -119,19 +119,36 @@ def display_no_signal(symbol: str) -> None:
 # ── ML Prediction ─────────────────────────────────────────────────────────
 
 
-def display_ml_prediction(prediction: Prediction, threshold: float, blocked: bool) -> None:
-    """Show ML prediction result with filter decision."""
+def display_ml_prediction(prediction: Prediction, threshold: float, blocked: bool = False, zone: str = "approved") -> None:
+    """Show ML prediction result with filter decision.
+
+    Args:
+        prediction: The ML prediction result.
+        threshold: The ML probability threshold for this symbol.
+        blocked: Whether the trade is hard-blocked (prob < hard_block_threshold).
+        zone: One of "hard_block", "soft", or "approved".
+    """
     # ML-adjusted confidence = rule confidence × ML probability
     ml_adj_conf = prediction.confidence
 
-    if blocked:
+    if blocked or zone == "hard_block":
         content = (
             f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
             f"ML prob [bold red]{prediction.probability:.1%}[/]  →  "
             f"[dim]adj. confidence [bold red]{ml_adj_conf:.1f}%[/]\n"
-            f"  [bold red]❌ BLOCKED[/]  below {threshold:.0%} threshold"
+            f"  [bold red]❌ HARD BLOCKED[/]  below {threshold:.0%} threshold (prob < 20%)"
         )
         console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="red", padding=(0, 2)))
+    elif zone == "soft":
+        confidence_multiplier = prediction.probability / threshold
+        content = (
+            f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
+            f"ML prob [bold yellow]{prediction.probability:.1%}[/]  →  "
+            f"[dim]adj. confidence [bold yellow]{ml_adj_conf:.1f}%[/]\n"
+            f"  [bold yellow]⚠ SOFT ZONE[/]  {prediction.probability:.1%} < {threshold:.0%} threshold  ·  "
+            f"confidence × {confidence_multiplier:.0%}"
+        )
+        console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="yellow", padding=(0, 2)))
     else:
         content = (
             f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
