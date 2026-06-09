@@ -88,17 +88,25 @@ def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFra
     while providing the same histogram-based gradient boosting algorithm.
     Built-in early stopping and class weight support improve performance
     on imbalanced datasets.
+
+    Note: HistGradientBoostingClassifier requires binary targets. When the
+    training data includes BREAKEVEN signals (target=0.5), we convert
+    them to LOSS (0) for this model type only.
     """
     from sklearn.ensemble import HistGradientBoostingClassifier
 
+    # Convert float targets to binary (BREAKEVEN 0.5 → 0/LOSS)
+    y_train_binary = (y_train >= 0.5).astype(int)
+    y_val_binary = (y_val >= 0.5).astype(int)
+
     model = HistGradientBoostingClassifier(**ML_CONFIG.histgbrt)
-    model.fit(X_train, y_train, X_val=X_val, y_val=y_val)
+    model.fit(X_train, y_train_binary, X_val=X_val, y_val=y_val_binary)
     y_pred = model.predict(X_val)
     y_proba = model.predict_proba(X_val)[:, 1]
 
     return {
         "model": model,
-        "metrics": _compute_metrics(y_val, y_pred, y_proba),
+        "metrics": _compute_metrics(y_val_binary, y_pred, y_proba),
     }
 
 

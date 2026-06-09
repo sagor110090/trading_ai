@@ -233,6 +233,9 @@ class MLConfig:
     # ML prediction thresholds per symbol (read from .env)
     # Default threshold and per-symbol overrides
     prediction_thresholds: dict = field(default_factory=lambda: {"DEFAULT": 0.3})
+    # Hard block threshold: trades with ML probability below this are always blocked.
+    # This catches trades where the model strongly disagrees (e.g., prob=0.15).
+    hard_block_threshold: float = 0.2
     # Minimum verified signals before ML predictions are used for filtering
     # Below this count, ML predictions are logged but don't block trades
     min_verified_for_filter: int = 50
@@ -549,6 +552,7 @@ def load_settings() -> Settings:
         ml=MLConfig(
             model_dir=model_dir,
             prediction_thresholds=prediction_thresholds,
+            hard_block_threshold=float(os.getenv("ML_HARD_BLOCK_THRESHOLD", "0.2")),
             auto_train=auto_train,
             drift_detection_enabled=drift_detection_enabled,
             min_signals_for_drift=min_signals_for_drift,

@@ -69,7 +69,10 @@ def retrain_models(symbols=None, model_types=None):
 
         logger.info(f"Dataset: {len(df)} signals")
         win_rate = df["win"].mean() * 100
-        logger.info(f"Win rate: {win_rate:.1f}% ({(df['win'] == 1).sum()} wins / {(df['win'] == 0).sum()} losses)")
+        wins = (df["win"] == 1.0).sum()
+        losses = (df["win"] == 0.0).sum()
+        breakevens = ((df["win"] > 0) & (df["win"] < 1)).sum()
+        logger.info(f"Win rate: {win_rate:.1f}% ({wins} wins / {losses} losses / {breakevens} breakevens)")
 
         # Split into train/validation (70/30, time-ordered)
         df = df.sort_values("timestamp").reset_index(drop=True)

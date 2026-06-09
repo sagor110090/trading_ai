@@ -1,4 +1,9 @@
-"""Live prediction: evaluates the probability that a rule-based signal will succeed."""
+"""Live prediction: evaluates the probability that a rule-based signal will succeed.
+
+Uses soft-voting ensemble: loads ALL active models for the symbol/timeframe
+and averages their predicted probabilities, weighted by AUC. Falls back to
+single-model prediction if only one model is available.
+"""
 
 import json
 import logging
@@ -20,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 ML_CONFIG = SETTINGS.ml
 MODEL_DIR = ML_CONFIG.model_dir
+
+# Minimum AUC for a model to be included in the ensemble.
+# Models below this threshold are skipped — they add noise, not signal.
+MIN_ENSEMBLE_AUC = 0.55
 
 # Model types that require an external library.  Checked once at startup
 # so that models whose library is missing are never even attempted.
@@ -62,25 +71,24 @@ class Prediction:
     feature_count: int
 
 
-def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
-    """Load the best active model for a symbol/timeframe.
+def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
+    """Load all active models for a symbol/timeframe, ordered by AUC.
 
-    Tries models ordered by best AUC first. If loading a model fails
-    (e.g. missing library like lightgbm), it automatically falls back
-    to the next best model instead of giving up entirely.
-
-    Returns (model, feature_columns, model_info) or None,
-    where model_info is a dict with the model metadata.
+    Returns list of (model, feature_columns, model_info) tuples.
+    Models with AUC below MIN_ENSEMBLE_AUC or with missing libraries are skipped.
+    If loading fails, the model is deactivated and the next one is tried.
     """
     from data.database import get_session
+    models = []
+
     try:
         with get_session() as session:
             # Get ALL active models for this symbol/timeframe, ordered by AUC.
-            # Exclude model types whose library is not installed (e.g. lightgbm).
             query = session.query(MLModelMeta).filter(
                 MLModelMeta.symbol == symbol,
                 MLModelMeta.timeframe == timeframe,
                 MLModelMeta.is_active == True,
+                MLModelMeta.roc_auc >= MIN_ENSEMBLE_AUC,
             )
             if _UNAVAILABLE_MODEL_TYPES:
                 query = query.filter(
@@ -89,10 +97,9 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
             candidates = query.order_by(MLModelMeta.roc_auc.desc()).all()
 
             if not candidates:
-                return None
+                return []
 
             for meta in candidates:
-                # Extract all needed data while session is open
                 model_info = {
                     "model_type": meta.model_type,
                     "version": meta.version,
@@ -107,7 +114,6 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
                 }
 
                 filepath = model_info["filepath"]
-                # Resolve relative paths against MODEL_DIR
                 if not os.path.isabs(filepath):
                     filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
                 if not os.path.exists(filepath):
@@ -118,10 +124,9 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
                     model = joblib.load(filepath)
                 except Exception as load_err:
                     logger.warning(
-                        "Failed to load %s model (AUC=%.4f): %s — deactivating and trying next",
+                        "Failed to load %s model (AUC=%.4f): %s — deactivating",
                         meta.model_type, meta.roc_auc, load_err,
                     )
-                    # Deactivate the broken model so we don't retry it every cycle
                     try:
                         meta.is_active = False
                         session.commit()
@@ -137,48 +142,24 @@ def _load_active_model(symbol: str, timeframe: str) -> Optional[tuple]:
                 else:
                     feature_cols = None
 
-                return model, feature_cols, model_info
-
-            # All candidates failed
-            logger.warning("No loadable model found for %s %s", symbol, timeframe)
-            return None
+                models.append((model, feature_cols, model_info))
 
     except Exception as e:
-        logger.error("Failed to load model: %s", e)
-        return None
+        logger.error("Failed to load models: %s", e)
+
+    return models
 
 
-def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
-    """Evaluate a trade signal using the best available ML model.
+def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> pd.DataFrame:
+    """Build a feature DataFrame from a signal's feature snapshot.
 
-    ML does NOT generate signals. It only evaluates the probability
-    that the rule-based signal will succeed.
-
-    Looks for models trained with timeframe="all" first (confluence/multi-TF),
-    then falls back to models matching the signal's own timeframe.
-
-    Args:
-        signal: The rule-based TradeSignal to evaluate.
-
-    Returns:
-        Prediction with ML-adjusted confidence, or None if no model available.
+    Handles session encoding, trade mode encoding, and NaN filling
+    with per-column neutral defaults. Backward-compatible with old
+    models that use ordinal session encoding.
     """
-    # Prefer the "all" timeframe model (trained on all signals for the symbol)
-    result = _load_active_model(signal.symbol, "all")
-    if result is None:
-        # Fallback: try signal's own timeframe
-        result = _load_active_model(signal.symbol, signal.timeframe)
-    if result is None:
-        logger.info("No active ML model for %s %s", signal.symbol, signal.timeframe)
-        return None
-
-    model, feature_cols, model_info = result
-
-    # Build feature vector from signal's feature snapshot
     features = signal.features.to_dict()
 
     # Encode session — backward compatible with old models
-    # Old models use ordinal "session_enc"; new models use one-hot "session_*"
     session = features.pop("session", None) or ""
     if feature_cols and SESSION_ENC_COL in feature_cols:
         # Legacy model: ordinal encoding
@@ -203,8 +184,7 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     else:
         X = pd.DataFrame([features])
 
-    # Replace NaN/None with per-column neutral defaults (for live prediction
-    # we can't drop rows, so we use sensible fill values).
+    # Replace NaN/None with per-column neutral defaults
     PREDICT_NAN_DEFAULTS = {
         "rsi14": 50.0, "macd_line": 0.0, "macd_signal": 0.0,
         "macd_histogram": 0.0, "momentum_score": 0.0, "trend_strength": 0.0,
@@ -217,35 +197,110 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     for col, default in PREDICT_NAN_DEFAULTS.items():
         if col in X.columns:
             X[col] = X[col].fillna(default)
-    # EMA/ATR columns: fill remaining NaN with 0 (signal data should not be
-    # NaN at prediction time, but guard against it)
     X = X.fillna(0.0)
     X = X.replace([np.inf, -np.inf], 0.0)
 
-    # Predict probability
-    try:
-        proba = model.predict_proba(X)[0, 1]
-    except Exception as e:
-        logger.error("Prediction failed: %s", e)
+    return X
+
+
+def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
+    """Evaluate a trade signal using soft-voting ensemble of ML models.
+
+    Loads all active models for the symbol/timeframe, predicts with each,
+    and averages their probabilities weighted by AUC. Falls back to a
+    single model if only one is available.
+
+    ML does NOT generate signals. It only evaluates the probability
+    that the rule-based signal will succeed.
+
+    Args:
+        signal: The rule-based TradeSignal to evaluate.
+
+    Returns:
+        Prediction with ML-adjusted confidence, or None if no model available.
+    """
+    # Try "all" timeframe models first, then signal's own timeframe
+    models = _load_active_models(signal.symbol, "all")
+    if not models:
+        models = _load_active_models(signal.symbol, signal.timeframe)
+    if not models:
+        logger.info("No active ML model for %s %s", signal.symbol, signal.timeframe)
         return None
 
-    # ML confidence = rule confidence * ML probability
-    # This penalises signals the ML model disagrees with
-    ml_confidence = signal.confidence * proba
+    # Single model: use directly (same as before)
+    if len(models) == 1:
+        model, feature_cols, model_info = models[0]
+        X = _build_feature_vector(signal, feature_cols)
+        try:
+            proba = model.predict_proba(X)[0, 1]
+        except Exception as e:
+            logger.error("Prediction failed: %s", e)
+            return None
+
+        ml_confidence = signal.confidence * proba
+        model_type_str = model_info["model_type"]
+        model_version = model_info["version"]
+
+    else:
+        # Ensemble: AUC-weighted soft voting
+        probabilities = []
+        auc_weights = []
+        model_types = []
+        best_auc = 0
+        best_version = 0
+        feature_count = 0
+
+        for model, feature_cols, model_info in models:
+            X = _build_feature_vector(signal, feature_cols)
+            try:
+                proba = model.predict_proba(X)[0, 1]
+                probabilities.append(proba)
+                auc_weights.append(model_info["roc_auc"])
+                model_types.append(model_info["model_type"])
+                if model_info["roc_auc"] > best_auc:
+                    best_auc = model_info["roc_auc"]
+                    best_version = model_info["version"]
+                feature_count = X.shape[1]
+            except Exception as e:
+                logger.warning("Prediction failed for %s: %s", model_info["model_type"], e)
+                continue
+
+        if not probabilities:
+            logger.error("All ensemble models failed for %s", signal.symbol)
+            return None
+
+        # AUC-weighted average probability
+        total_weight = sum(auc_weights)
+        if total_weight > 0:
+            proba = sum(p * w for p, w in zip(probabilities, auc_weights)) / total_weight
+        else:
+            proba = sum(probabilities) / len(probabilities)
+
+        ml_confidence = signal.confidence * proba
+        model_type_str = "+".join(model_types)
+        model_version = best_version
+        feature_count = feature_count
+
+        logger.info(
+            "Ensemble (%d models): probs=%s, weighted=%.4f",
+            len(probabilities),
+            [f"{p:.4f}" for p in probabilities],
+            proba,
+        )
 
     prediction = Prediction(
         signal=signal.signal.value,
         confidence=round(ml_confidence, 2),
         probability=round(float(proba), 4),
-        model_type=model_info["model_type"],
-        model_version=model_info["version"],
-        feature_count=X.shape[1],
+        model_type=model_type_str,
+        model_version=model_version,
+        feature_count=feature_count if len(models) > 1 else X.shape[1],
     )
 
     logger.info(
         "ML prediction: %s prob=%.4f ml_conf=%.2f (rule_conf=%.2f) model=%s_v%d",
         signal.signal.value, proba, ml_confidence, signal.confidence,
-        model_info["model_type"], model_info["version"],
+        model_type_str, model_version,
     )
 
     return prediction

@@ -110,7 +110,7 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
             v.max_adverse_excursion
         FROM signals s
         JOIN signal_verifications v ON v.signal_id = s.id
-        WHERE v.result IN ('WIN', 'LOSS')
+        WHERE v.result IN ('WIN', 'LOSS', 'BREAKEVEN')
     """
 
     conditions = []
@@ -134,8 +134,15 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
 
-    # Encode target: WIN=1, LOSS=0
-    df[TARGET_COLUMN] = (df["result"] == SignalResult.WIN.value).astype(int)
+    # Encode target: WIN=1, LOSS=0, BREAKEVEN=0.5
+    # BREAKEVEN signals are "close calls" — they contain useful information
+    # that the model can learn from. A 0.5 target means "uncertain outcome".
+    target_map = {
+        SignalResult.WIN.value: 1.0,
+        SignalResult.LOSS.value: 0.0,
+        SignalResult.BREAKEVEN.value: 0.5,
+    }
+    df[TARGET_COLUMN] = df["result"].map(target_map).fillna(0.0)
 
     # Encode session with one-hot encoding
     for cat in SESSION_CATEGORIES:
