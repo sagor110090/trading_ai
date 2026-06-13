@@ -113,11 +113,33 @@ def _compute_stop_take(
     symbol: Symbol,
     sl_mult: float,
     tp_mult: float,
+    atr_ratio: Optional[float] = None,
+    symbol_name: str = "",
 ) -> tuple[float, float]:
     """Calculate stop loss and take profit based on ATR multipliers.
 
+    Applies two safety layers in fast markets:
+    1. Fast-market reduction: when ATR ratio >= threshold, SL/TP multipliers
+       are scaled down by SETTINGS.fast_market.sl_tp_factor (default 0.5).
+    2. Max distance cap: SL/TP distances are clamped to per-symbol max values
+       if configured (e.g., MAX_SL_DISTANCE_XAUUSD=30).
+
     Automatically adds broker spread buffer to SL to account for execution latency.
     """
+    # Fast-market reduction: shrink SL/TP when ATR ratio exceeds threshold
+    fast_applied = False
+    if atr_ratio is not None and atr_ratio >= SETTINGS.fast_market.atr_threshold:
+        original_sl, original_tp = sl_mult, tp_mult
+        sl_mult *= SETTINGS.fast_market.sl_tp_factor
+        tp_mult *= SETTINGS.fast_market.sl_tp_factor
+        fast_applied = True
+        logger.info(
+            "Fast market SL/TP reduction for %s: ATR ratio %.2f >= %.2f, "
+            "SL mult %.2f -> %.2f, TP mult %.2f -> %.2f",
+            symbol_name or symbol.value, atr_ratio, SETTINGS.fast_market.atr_threshold,
+            original_sl, sl_mult, original_tp, tp_mult,
+        )
+
     if atr is None or atr <= 0 or pd.isna(atr):
         if symbol == Symbol.XAUUSD:
             sl_distance = entry * 0.0015
@@ -133,6 +155,21 @@ def _compute_stop_take(
     broker_buffer = _pips_to_price(SETTINGS.broker_spread_pips, symbol, entry)
     sl_distance += broker_buffer
 
+    # Cap SL/TP distances to per-symbol maximums (prevents runaway risk in volatile markets)
+    max_sl, max_tp = SETTINGS.get_max_sl_tp(symbol_name or symbol.value)
+    if max_sl is not None and sl_distance > max_sl:
+        logger.info(
+            "SL distance capped for %s: %.5f -> %.5f (max %.5f)",
+            symbol_name or symbol.value, sl_distance, max_sl, max_sl,
+        )
+        sl_distance = max_sl
+    if max_tp is not None and tp_distance > max_tp:
+        logger.info(
+            "TP distance capped for %s: %.5f -> %.5f (max %.5f)",
+            symbol_name or symbol.value, tp_distance, max_tp, max_tp,
+        )
+        tp_distance = max_tp
+
     if signal == SignalType.BUY:
         stop_loss = entry - sl_distance
         take_profit = entry + tp_distance
@@ -144,8 +181,9 @@ def _compute_stop_take(
         take_profit = entry
 
     logger.debug(
-        "SL/TP for %s: entry=%.5f SL=%.5f TP=%.5f (broker buffer=%.5f pips=%.2f)",
+        "SL/TP for %s: entry=%.5f SL=%.5f TP=%.5f (broker buffer=%.5f pips=%.2f%s)",
         symbol.value, entry, stop_loss, take_profit, broker_buffer, SETTINGS.broker_spread_pips,
+        " [FAST-MKT]" if fast_applied else "",
     )
 
     return round(stop_loss, 5), round(take_profit, 5)
@@ -235,6 +273,7 @@ def generate_signal_scalping(
     sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
         h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
+        atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
     )
 
     return TradeSignal(
@@ -343,6 +382,7 @@ def generate_signal_day_trading(
     sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
         h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
+        atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
     )
 
     return TradeSignal(
@@ -450,6 +490,7 @@ def generate_signal_swing(
     sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
         signal_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
+        atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
     )
 
     return TradeSignal(

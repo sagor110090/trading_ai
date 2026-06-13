@@ -83,11 +83,12 @@ class TradingPlatform(str, Enum):
 
 @dataclass(frozen=True)
 class FastMarketConfig:
-    """Configuration for fast market cooldown extension.
+    """Configuration for fast market handling.
 
     When ATR (Average True Range) exceeds a threshold relative to its average,
-    the market is considered 'fast' (high volatility). In fast markets, cooldowns
-    are multiplied to reduce overtrading during chaotic conditions.
+    the market is considered 'fast' (high volatility). In fast markets:
+    - Cooldowns are multiplied to reduce overtrading
+    - SL/TP multipliers are reduced to limit risk per trade
 
     ATR ratio = current ATR / average ATR over the lookback window.
     """
@@ -97,6 +98,10 @@ class FastMarketConfig:
     # Multiplier applied to cooldowns when market is fast
     # 2.0 = cooldowns last twice as long
     cooldown_multiplier: float = 2.0
+    # Factor to reduce SL/TP distances in fast markets
+    # 0.5 = halve SL/TP distances when ATR ratio >= threshold
+    # Applied before the max distance cap.
+    sl_tp_factor: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -334,6 +339,11 @@ class Settings:
     # Per-symbol SL/TP multipliers (fallback to trade mode defaults)
     sl_multipliers: dict = field(default_factory=lambda: {})
     tp_multipliers: dict = field(default_factory=lambda: {})
+    # Per-symbol max SL/TP distance caps in price units (None = uncapped).
+    # Prevents runaway risk when ATR spikes in volatile markets.
+    # E.g. {"XAUUSD": 30.0} means gold SL never exceeds $30 from entry.
+    max_sl_distance: dict = field(default_factory=lambda: {})
+    max_tp_distance: dict = field(default_factory=lambda: {})
 
     def get_trade_size(self, symbol: str) -> float:
         """Get position size for a symbol. Falls back to DEFAULT."""
@@ -366,6 +376,16 @@ class Settings:
                     tp_mult if tp_mult is not None else default_tp)
 
         return sl_mult, tp_mult
+
+    def get_max_sl_tp(self, symbol: str) -> tuple[float | None, float | None]:
+        """Get max SL and TP distance caps for a symbol in price units.
+
+        Returns (max_sl, max_tp) where None means uncapped.
+        """
+        return (
+            self.max_sl_distance.get(symbol),
+            self.max_tp_distance.get(symbol),
+        )
 
     def get_prediction_threshold(self, symbol: str) -> float:
         """Get ML prediction threshold for a symbol. Falls back to DEFAULT."""
@@ -505,6 +525,23 @@ def load_settings() -> Settings:
             except ValueError:
                 pass
 
+    # Read max SL/TP distance caps per symbol (in price units)
+    max_sl_distance = {}
+    max_tp_distance = {}
+    for key, value in os.environ.items():
+        if key.startswith("MAX_SL_DISTANCE_"):
+            symbol_name = key.replace("MAX_SL_DISTANCE_", "")
+            try:
+                max_sl_distance[symbol_name] = float(value)
+            except ValueError:
+                pass
+        elif key.startswith("MAX_TP_DISTANCE_"):
+            symbol_name = key.replace("MAX_TP_DISTANCE_", "")
+            try:
+                max_tp_distance[symbol_name] = float(value)
+            except ValueError:
+                pass
+
     # Model directory — absolute path so it works regardless of CWD
     model_dir = os.path.join(_project_root, "trading_ai", "ml", "models")
     auto_train = os.getenv("ML_AUTO_TRAIN", "false").lower() == "true"
@@ -525,6 +562,7 @@ def load_settings() -> Settings:
     # Fast market cooldown settings
     fast_market_atr_threshold = float(os.getenv("FAST_MARKET_ATR_THRESHOLD", "1.5"))
     fast_market_cooldown_multiplier = float(os.getenv("FAST_MARKET_COOLDOWN_MULTIPLIER", "2.0"))
+    fast_market_sl_tp_factor = float(os.getenv("FAST_MARKET_SL_TP_FACTOR", "0.5"))
 
     # Correlation limit settings
     max_positions_per_group = {
@@ -568,6 +606,7 @@ def load_settings() -> Settings:
         fast_market=FastMarketConfig(
             atr_threshold=fast_market_atr_threshold,
             cooldown_multiplier=fast_market_cooldown_multiplier,
+            sl_tp_factor=fast_market_sl_tp_factor,
         ),
         max_positions_per_group=max_positions_per_group,
         trade_mode=trade_mode,
@@ -577,6 +616,8 @@ def load_settings() -> Settings:
         trade_sizes=trade_sizes,
         sl_multipliers=sl_multipliers,
         tp_multipliers=tp_multipliers,
+        max_sl_distance=max_sl_distance,
+        max_tp_distance=max_tp_distance,
         symbols=symbols,
         position_monitor_interval=int(os.getenv("POSITION_MONITOR_INTERVAL", "30")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
