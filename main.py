@@ -50,7 +50,7 @@ from display import (
     display_weekly_close_status,
 )
 from indicators.features import compute_all_features
-from ml.drift_detection import check_model_drift, sync_verified_signals_for_drift, track_ml_prediction, update_prediction_outcome
+from ml.drift_detection import check_model_drift, sync_verified_signals_for_drift, track_ml_prediction
 from ml.predictor import Prediction, predict_signal
 from signals.engine import TradeSignal, generate_signal
 from trade.executor import (

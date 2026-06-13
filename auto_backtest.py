@@ -28,7 +28,7 @@ from config.settings import SETTINGS, Symbol, Timeframe, TradeMode, TradingPlatf
 from config.utils import normalize_symbol
 from data.collector import CapitalComClient
 from data.database import get_session
-from data.models import Candle, Signal, SignalVerification, MLModelMeta
+from data.models import Signal, SignalVerification, MLModelMeta
 from sqlalchemy import func, desc
 
 # Import backtest functions

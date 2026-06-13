@@ -121,26 +121,6 @@ class CapitalComClient:
             if not self.authenticate():
                 raise ConnectionError("Cannot authenticate with Capital.com API")
 
-    def search_market(self, search_term: str) -> list[dict]:
-        """Search for market instruments. Useful for finding correct epic codes."""
-        self._ensure_auth()
-        url = f"{self._base_url}/api/v1/markets"
-        params = {"searchTerm": search_term}
-
-        try:
-            resp = self._session.get(url, params=params, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            markets = data.get("markets", [])
-            return [{
-                "epic": m.get("epic", ""),
-                "name": m.get("instrumentName", ""),
-                "symbol": m.get("symbol", ""),
-            } for m in markets]
-        except requests.RequestException as e:
-            logger.error("Market search failed for '%s': %s", search_term, e)
-            return []
-
     def fetch_candles(
         self,
         symbol: Symbol,

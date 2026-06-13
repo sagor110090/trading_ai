@@ -27,11 +27,9 @@ from config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
 from config.utils import broker_symbol, normalize_symbol
 from data.collector import CapitalComClient
 from data.database import get_session
-from data.models import Signal, SignalVerification
+from data.models import Signal
 from trade.executor import (
     OpenPosition,
-    close_position,
-    get_open_positions,
     get_open_positions_unified,
     has_open_position_unified,
     place_trade_unified,
@@ -283,80 +281,6 @@ class PositionManager:
             reason="No open position or cooldown",
         )
 
-    # ── Execute a trade decision ──────────────────────────────────────────
-
-    def execute_trade_decision(
-        self, trade_signal, decision: TradeDecision
-    ) -> dict:
-        """Execute the trade based on the decision.
-
-        Returns a dict with:
-            success: bool
-            action: str (what was done)
-            reason: str
-            deal_reference: Optional[str]
-            closed_position: Optional[str]  # if we reversed
-        """
-        from trade.executor import place_trade_unified
-
-        result = {
-            "success": False,
-            "action": decision.action,
-            "reason": decision.reason,
-            "deal_reference": None,
-            "closed_position": None,
-        }
-
-        if decision.action == "skip_cooldown":
-            logger.info("Trade skipped: %s", decision.reason)
-            return result
-
-        if decision.action == "reverse_and_place":
-            # Close the existing position first
-            pos = decision.existing_position
-            if pos is None:
-                result["reason"] = "Missing existing position for reversal"
-                logger.error(result["reason"])
-                return result
-            logger.info(
-                "Reversing position: closing %s %s (deal %s) to take opposite trade",
-                pos.direction, pos.epic, pos.deal_id,
-            )
-            close_result = close_position_unified(self.client, pos)
-            if not close_result.success:
-                logger.error("Failed to close position %s: %s", pos.deal_id, close_result.error)
-                result["reason"] = f"Failed to close existing position: {close_result.error}"
-                return result
-
-            self.register_position_close(
-                symbol=trade_signal.symbol,
-                reason="reversal",
-                deal_id=pos.deal_id,
-                source="reverse_and_place",
-            )
-
-            result["closed_position"] = f"{pos.direction} {pos.epic} (deal {pos.deal_id})"
-            logger.info("Position closed successfully: %s", close_result.deal_id)
-
-        if decision.action in ("place", "reverse_and_place"):
-            # Place the new trade
-            size = SETTINGS.get_trade_size(trade_signal.symbol)
-            order_result = place_trade_unified(self.client, trade_signal, size=size)
-
-            if order_result.success:
-                result["success"] = True
-                result["deal_reference"] = order_result.deal_reference
-                logger.info(
-                    "Trade placed: %s %s size=%s deal=%s",
-                    trade_signal.signal.value, trade_signal.symbol, size,
-                    order_result.deal_reference,
-                )
-            else:
-                result["reason"] = order_result.error or "Order failed"
-                logger.error("Trade failed: %s", order_result.error)
-
-        return result
-
     # ── Register events ────────────────────────────────────────────────────
 
     def register_position_close(
@@ -474,23 +398,6 @@ class PositionManager:
             max((until - now).total_seconds() / 60, 0.0),
         )
         return entry
-
-    def register_closed(
-        self,
-        symbol: str,
-        reason: str,
-        deal_id: Optional[str] = None,
-        source: str = "legacy",
-        closed_at: Optional[datetime] = None,
-    ) -> Optional[CooldownEntry]:
-        """Backward-compatible alias for close registration."""
-        return self.register_position_close(
-            symbol=symbol,
-            reason=reason,
-            deal_id=deal_id,
-            source=source,
-            closed_at=closed_at,
-        )
 
     def register_verified_result(
         self,

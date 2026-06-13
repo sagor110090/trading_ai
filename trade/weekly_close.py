@@ -265,20 +265,3 @@ def check_weekly_close_status(
         asset_class=asset_class,
         is_weekend=False,
     )
-
-
-def get_symbols_with_weekly_close(symbols: list[str]) -> dict[str, str]:
-    """Get mapping of symbols to their asset classes for those with weekly close.
-
-    Args:
-        symbols: List of symbols to check
-
-    Returns:
-        Dict mapping symbol to asset class (only for symbols with weekly close)
-    """
-    result = {}
-    for symbol in symbols:
-        asset_class = get_asset_class(symbol)
-        if has_weekly_close(asset_class):
-            result[symbol] = asset_class
-    return result

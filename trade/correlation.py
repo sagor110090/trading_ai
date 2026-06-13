@@ -142,24 +142,3 @@ def check_correlation_limit(
         max_allowed=max_allowed,
         reason=f"Have {current_count}/{max_allowed} positions in {group} group - OK",
     )
-
-
-def get_correlation_summary(client) -> dict:
-    """Get summary of current positions by correlation group.
-
-    Returns:
-        Dict with group names and position counts
-    """
-    open_positions = get_open_positions_unified(client)
-    summary = {}
-
-    for group in CORRELATION_GROUPS.keys():
-        count = count_positions_in_group(open_positions, group)
-        max_allowed = getattr(SETTINGS, "max_positions_per_group", {}).get(group, 1)
-        summary[group] = {
-            "current": count,
-            "max": max_allowed,
-            "available": max(0, max_allowed - count),
-        }
-
-    return summary

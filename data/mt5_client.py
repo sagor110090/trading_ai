@@ -168,13 +168,6 @@ class MT5Client:
             if not self.connect():
                 raise ConnectionError("Cannot connect to MetaTrader 5")
 
-    def shutdown(self) -> None:
-        """Shutdown MT5 connection."""
-        if self._connected and self._mt5:
-            self._mt5.shutdown()
-            self._connected = False
-            logger.info("MT5 connection closed")
-
     def fetch_candles(
         self,
         symbol: Symbol,

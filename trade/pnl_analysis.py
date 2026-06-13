@@ -44,17 +44,6 @@ class PnLSummary:
 
 
 @dataclass
-class DailyPnL:
-    """Daily PnL aggregation."""
-    date: str
-    total_trades: int
-    wins: int
-    losses: int
-    pnl: float
-    pnl_pct: float  # % of starting balance (if balance provided)
-
-
-@dataclass
 class SymbolPerformance:
     """Performance metrics per symbol."""
     symbol: str
@@ -257,51 +246,6 @@ def _calculate_drawdown(
             max_dd_pct = dd_pct
 
     return max_dd, max_dd_pct
-
-
-def get_daily_pnl(days: int = 30) -> List[DailyPnL]:
-    """Get daily PnL aggregation for the last N days.
-
-    Args:
-        days: Number of days to look back
-
-    Returns:
-        List of DailyPnL sorted by date descending
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-
-    with get_session() as session:
-        # Extract date from closed_at and group by it
-        results = session.query(
-            func.date(TradeLog.closed_at).label('trade_date'),
-            func.count(TradeLog.id).label('total'),
-            func.sum(
-                case((TradeLog.final_pnl > 0, 1), else_=0)
-            ).label('wins'),
-            func.sum(
-                case((TradeLog.final_pnl < 0, 1), else_=0)
-            ).label('losses'),
-            func.sum(TradeLog.final_pnl).label('pnl'),
-        ).filter(
-            TradeLog.final_pnl.isnot(None),
-            TradeLog.closed_at >= cutoff
-        ).group_by(
-            func.date(TradeLog.closed_at)
-        ).order_by(
-            func.date(TradeLog.closed_at).desc()
-        ).all()
-
-        return [
-            DailyPnL(
-                date=str(r.trade_date),
-                total_trades=r.total or 0,
-                wins=r.wins or 0,
-                losses=r.losses or 0,
-                pnl=r.pnl or 0.0,
-                pnl_pct=0.0,  # Can be calculated if starting balance known
-            )
-            for r in results
-        ]
 
 
 def get_symbol_performance(top_n: int = 10) -> List[SymbolPerformance]:

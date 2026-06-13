@@ -380,31 +380,3 @@ class TPProgressTracker:
     def get_tracked_keys(self) -> list[str]:
         """Return all current tracker keys (deal_ids or symbol_direction)."""
         return list(self.active_trades.keys())
-
-    def remove_position(self, symbol: str, direction: str) -> bool:
-        """Remove a position from tracking without closing it."""
-        key = f"{symbol}_{direction}"
-        if key in self.active_trades:
-            del self.active_trades[key]
-            return True
-        return False
-
-
-def calculate_tp_progress(
-    entry: float,
-    tp: float,
-    current: float,
-    direction: str,
-) -> float:
-    """Calculate TP progress ratio (0.0 to 1.0+)."""
-    if direction.upper() == "BUY":
-        profit_distance = current - entry
-        tp_distance = tp - entry
-    else:
-        profit_distance = entry - current
-        tp_distance = entry - tp
-
-    if tp_distance == 0:
-        return 0.0
-
-    return max(0.0, profit_distance / tp_distance)

@@ -75,14 +75,6 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
-def get_raw_session() -> Session:
-    """Get a bare session for legacy code that manages its own commits.
-
-    IMPORTANT: Callers MUST commit and close the session themselves.
-    Prefer get_session() instead.
-    """
-    return get_session_factory()()
-
 
 def create_tables() -> None:
     engine = get_engine()
@@ -108,9 +100,3 @@ def create_tables() -> None:
                 logger.info("Migration: added column %s.%s", table, column)
 
     logger.info("Database tables created/verified")
-
-
-def drop_tables() -> None:
-    engine = get_engine()
-    Base.metadata.drop_all(engine)
-    logger.warning("All tables dropped")

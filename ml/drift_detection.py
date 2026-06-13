@@ -249,21 +249,6 @@ def track_ml_prediction(
     )
 
 
-def update_prediction_outcome(signal_id: str, actual_outcome: str) -> None:
-    """Update a prediction's actual outcome after verification.
-
-    Call this when a signal is verified.
-
-    Args:
-        signal_id: Signal identifier (without prefix)
-        actual_outcome: "WIN", "LOSS", or "BREAKEVEN"
-    """
-    detector = get_drift_detector()
-    # Try with signal_id as-is and with common prefixes
-    for prefix in ["", "live_", "backtest_"]:
-        detector.update_outcome(f"{prefix}{signal_id}", actual_outcome)
-
-
 def check_model_drift(symbol: str) -> Optional[DriftReport]:
     """Check for ML model drift on a symbol.
 

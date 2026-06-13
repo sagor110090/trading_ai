@@ -267,35 +267,6 @@ def compute_all_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def extract_feature_set(df: pd.DataFrame, idx: int) -> FeatureSet:
-    """Extract a FeatureSet from a specific row index of the feature DataFrame.
-
-    Does NOT include lag features — use extract_feature_set_with_lags() for that.
-    """
-    row = df.iloc[idx]
-    return FeatureSet(
-        ema20=_safe_float(row, "ema20"),
-        ema50=_safe_float(row, "ema50"),
-        ema200=_safe_float(row, "ema200"),
-        rsi14=_safe_float(row, "rsi14"),
-        macd_line=_safe_float(row, "macd_line"),
-        macd_signal=_safe_float(row, "macd_signal"),
-        macd_histogram=_safe_float(row, "macd_histogram"),
-        atr14=_safe_float(row, "atr14"),
-        candle_body_pct=_safe_float(row, "candle_body_pct"),
-        upper_wick_pct=_safe_float(row, "upper_wick_pct"),
-        lower_wick_pct=_safe_float(row, "lower_wick_pct"),
-        dist_ema20=_safe_float(row, "dist_ema20"),
-        dist_ema50=_safe_float(row, "dist_ema50"),
-        dist_ema200=_safe_float(row, "dist_ema200"),
-        trend_strength=_safe_float(row, "trend_strength"),
-        momentum_score=_safe_float(row, "momentum_score"),
-        session=_safe_str(row, "session"),
-        spread=_safe_float(row, "spread"),
-        atr_ratio=_safe_float(row, "atr_ratio"),
-    )
-
-
 def extract_feature_set_with_lags(df: pd.DataFrame, idx: int) -> FeatureSet:
     """Extract a FeatureSet with lag features from a feature DataFrame.
 
@@ -309,20 +280,40 @@ def extract_feature_set_with_lags(df: pd.DataFrame, idx: int) -> FeatureSet:
     Returns:
         FeatureSet with lag fields populated from previous candles.
     """
-    feat = extract_feature_set(df, idx)
+    row = df.iloc[idx]
+    base = {
+        "ema20": _safe_float(row, "ema20"),
+        "ema50": _safe_float(row, "ema50"),
+        "ema200": _safe_float(row, "ema200"),
+        "rsi14": _safe_float(row, "rsi14"),
+        "macd_line": _safe_float(row, "macd_line"),
+        "macd_signal": _safe_float(row, "macd_signal"),
+        "macd_histogram": _safe_float(row, "macd_histogram"),
+        "atr14": _safe_float(row, "atr14"),
+        "candle_body_pct": _safe_float(row, "candle_body_pct"),
+        "upper_wick_pct": _safe_float(row, "upper_wick_pct"),
+        "lower_wick_pct": _safe_float(row, "lower_wick_pct"),
+        "dist_ema20": _safe_float(row, "dist_ema20"),
+        "dist_ema50": _safe_float(row, "dist_ema50"),
+        "dist_ema200": _safe_float(row, "dist_ema200"),
+        "trend_strength": _safe_float(row, "trend_strength"),
+        "momentum_score": _safe_float(row, "momentum_score"),
+        "session": _safe_str(row, "session"),
+        "spread": _safe_float(row, "spread"),
+        "atr_ratio": _safe_float(row, "atr_ratio"),
+    }
 
     # Extract lag features from previous candles
-    lag_fields = {}
     for col in LAG_COLUMNS:
         for lag in LAG_PERIODS:
             key = f"{col}_lag{lag}"
             if idx - lag >= 0 and col in df.columns:
                 val = df.iloc[idx - lag].get(col)
-                lag_fields[key] = float(val) if pd.notna(val) else None
+                base[key] = float(val) if pd.notna(val) else None
             else:
-                lag_fields[key] = None
+                base[key] = None
 
-    return FeatureSet(**{**feat.to_dict(), **lag_fields})
+    return FeatureSet(**base)
 
 
 def _safe_float(row: pd.Series, col: str) -> Optional[float]:
