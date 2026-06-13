@@ -121,29 +121,31 @@ def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFra
 def _train_catboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
     """Train CatBoost classifier and return metrics.
 
-    CatBoost supports float targets natively — BREAKEVEN signals (0.5)
-    are kept as partial targets, giving the model a nuanced signal that
-    the outcome was uncertain.
+    CatBoost's binary classification mode requires exactly 2 unique target
+    values. When BREAKEVEN signals (target=0.5) are present, CatBoost
+    interprets the 3 unique values as multiclass, which conflicts with
+    binary-only settings like Logloss and auto_class_weights.
+    Solution: binarize targets, mapping BREAKEVEN (0.5) → WIN (1),
+    same as XGBoost and HistGBRT.
     """
     from catboost import CatBoostClassifier
 
-    # CatBoost handles float targets for binary classification
+    # Convert float targets to binary: BREAKEVEN (0.5) → WIN (1)
+    y_train_binary = (y_train >= 0.5).astype(int)
+    y_val_binary = (y_val >= 0.5).astype(int)
+
     model = CatBoostClassifier(**ML_CONFIG.catboost)
     model.fit(
-        X_train, y_train,
-        eval_set=(X_val, y_val),
+        X_train, y_train_binary,
+        eval_set=(X_val, y_val_binary),
         verbose=False,
     )
     y_pred = model.predict(X_val)
     y_proba = model.predict_proba(X_val)[:, 1]
 
-    # For metrics, use binary targets (BREAKEVEN 0.5 → WIN for evaluation)
-    y_val_binary = (y_val >= 0.5).astype(int)
-    y_pred_binary = (y_pred >= 0.5).astype(int)
-
     return {
         "model": model,
-        "metrics": _compute_metrics(y_val_binary, y_pred_binary, y_proba),
+        "metrics": _compute_metrics(y_val_binary, y_pred.flatten(), y_proba),
     }
 
 
