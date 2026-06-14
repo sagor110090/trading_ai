@@ -628,7 +628,8 @@ def run_auto_backtest(
     statuses = analyze_all_symbols(symbols)
 
     # Filter symbols that need processing (any with new data available)
-    if force:
+    # In reset mode, all symbols need processing regardless of staleness
+    if force or reset:
         to_process = statuses
     else:
         to_process = [s for s in statuses if s["needs_update"]]
@@ -697,13 +698,21 @@ def run_auto_backtest(
                 )
 
                 total_new_candles = sum(candle_results.values())
-                if total_new_candles == 0:
+
+                if total_new_candles == 0 and not reset:
                     console.print("[dim]No new candles — skipping[/]")
                     results["skipped"].append(symbol.value)
                     continue
 
-                # 2. Generate signals for new period
-                from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
+                # 2. Generate signals
+                if reset:
+                    # In reset mode, replay ALL signals from existing candle data
+                    # (candles are already in DB, signals were deleted)
+                    from_date = datetime.now(tz=timezone.utc) - timedelta(days=days) if days else (
+                        datetime.now(tz=timezone.utc) - timedelta(weeks=4)
+                    )
+                else:
+                    from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
                 signal_results = generate_new_signals(symbol, mode, from_date, skip_duplicates=not reset)
 
                 if "error" in signal_results:
