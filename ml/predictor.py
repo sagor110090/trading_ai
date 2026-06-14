@@ -256,48 +256,44 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         logger.info("No active ML model for %s %s", signal.symbol, signal.timeframe)
         return None
 
-    # Single model: use directly (same as before)
-    if len(models) == 1:
-        model, feature_cols, model_info = models[0]
-        X = _build_feature_vector(signal, feature_cols)
+    # Try each model, skipping those with incompatible feature sets.
+    # Old models may have different feature columns than the current pipeline.
+    probabilities = []
+    auc_weights = []
+    model_types = []
+    best_auc = 0
+    best_version = 0
+    feature_count = 0
+
+    for model, feature_cols, model_info in models:
         try:
-            proba = model.predict_proba(X)[0, 1]
-        except Exception as e:
-            logger.error("Prediction failed: %s", e)
-            return None
-
-        ml_confidence = signal.confidence * proba
-        model_type_str = model_info["model_type"]
-        model_version = model_info["version"]
-
-    else:
-        # Ensemble: AUC-weighted soft voting
-        probabilities = []
-        auc_weights = []
-        model_types = []
-        best_auc = 0
-        best_version = 0
-        feature_count = 0
-
-        for model, feature_cols, model_info in models:
             X = _build_feature_vector(signal, feature_cols)
-            try:
-                proba = model.predict_proba(X)[0, 1]
-                probabilities.append(proba)
-                auc_weights.append(model_info["roc_auc"])
-                model_types.append(model_info["model_type"])
-                if model_info["roc_auc"] > best_auc:
-                    best_auc = model_info["roc_auc"]
-                    best_version = model_info["version"]
-                feature_count = X.shape[1]
-            except Exception as e:
-                logger.warning("Prediction failed for %s: %s", model_info["model_type"], e)
-                continue
+            proba = model.predict_proba(X)[0, 1]
+            probabilities.append(proba)
+            auc_weights.append(model_info["roc_auc"])
+            model_types.append(model_info["model_type"])
+            if model_info["roc_auc"] > best_auc:
+                best_auc = model_info["roc_auc"]
+                best_version = model_info["version"]
+            feature_count = X.shape[1]
+        except Exception as e:
+            logger.warning(
+                "Prediction failed for %s v%d: %s — skipping",
+                model_info["model_type"], model_info["version"], e,
+            )
+            continue
 
-        if not probabilities:
-            logger.error("All ensemble models failed for %s", signal.symbol)
-            return None
+    if not probabilities:
+        logger.error("All models failed for %s %s — using rule-based confidence only", signal.symbol, signal.timeframe)
+        return None
 
+    # Ensemble or single model result
+    if len(probabilities) == 1:
+        proba = probabilities[0]
+        ml_confidence = signal.confidence * proba
+        model_type_str = model_types[0]
+        model_version = best_version
+    else:
         # AUC-weighted average probability
         total_weight = sum(auc_weights)
         if total_weight > 0:
@@ -307,9 +303,12 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
 
         ml_confidence = signal.confidence * proba
         model_type_str = "+".join(model_types)
-        model_version = best_version
-        feature_count = feature_count
 
+    logger.info(
+        "Prediction: %d model(s) succeeded for %s",
+        len(probabilities), signal.symbol,
+    )
+    if len(probabilities) > 1:
         logger.info(
             "Ensemble (%d models): probs=%s, weighted=%.4f",
             len(probabilities),
@@ -323,7 +322,7 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         probability=round(float(proba), 4),
         model_type=model_type_str,
         model_version=model_version,
-        feature_count=feature_count if len(models) > 1 else X.shape[1],
+        feature_count=feature_count,
     )
 
     logger.info(
