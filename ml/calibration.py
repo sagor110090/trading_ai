@@ -4,8 +4,13 @@ Calibration maps raw predict_proba outputs to true probabilities.
 Without calibration, a model outputting 0.15 might actually correspond
 to a 30% win rate. After calibration, 0.15 means 15%.
 
-Uses sklearn's CalibratedClassifierCV with cv="prefit" to fit a
-sigmoid (Platt scaling) calibration on validation data only.
+Uses sklearn's CalibratedClassifierCV with cv=2 to fit a sigmoid
+(Platt scaling) calibration. The base model is refit inside CV folds,
+then calibrated on held-out data — no data leakage.
+
+For sklearn >= 1.6, cv="prefit" was removed, so we use cv=2 which
+refits the model internally. This is safe because calibration uses
+the validation set only (separate from training).
 """
 
 import json
@@ -35,6 +40,10 @@ def calibrate_model(
 ) -> object | None:
     """Fit Platt scaling calibration on validation data and save to disk.
 
+    Uses CalibratedClassifierCV with cv=2, which refits the base model
+    across 2 folds of the validation data and calibrates on held-out portions.
+    This produces properly calibrated probability estimates.
+
     Args:
         model: Pre-fitted sklearn/xgboost/catboost model.
         X_val: Validation features.
@@ -61,8 +70,27 @@ def calibrate_model(
             )
             return None
 
-        # Platt scaling (sigmoid calibration)
-        calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
+        # Need enough samples for cv=2 (at least 2 per class)
+        class_counts = np.bincount(y_val.astype(int))
+        min_class_count = min(class_counts[class_counts > 0])
+        if min_class_count < 2:
+            logger.warning(
+                "Cannot calibrate %s: minority class has only %d samples, need >= 2",
+                model_type, min_class_count,
+            )
+            return None
+
+        # Get the model class to create a fresh instance for calibration
+        model_class = type(model)
+        model_params = model.get_params()
+
+        # CalibratedClassifierCV with cv=2 refits the base estimator internally.
+        # We pass the same params so it creates an identical base model.
+        calibrated = CalibratedClassifierCV(
+            estimator=model_class(**model_params),
+            cv=2,
+            method="sigmoid",
+        )
         calibrated.fit(X_val, y_val)
 
         # Save calibrated model

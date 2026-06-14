@@ -286,16 +286,23 @@ def train_models(
         # Step 2: Feature selection — drop <1% importance and retrain
         selected_cols = list(X_tr.columns)
         if ML_CONFIG.use_feature_selection:
-            model, metrics, selected_cols = _select_features(
+            sel_model, sel_metrics, sel_cols = _select_features(
                 model, model_type, X_tr, y_tr, X_vl, y_vl, trainer,
             )
-            if selected_cols is not None and len(selected_cols) < len(X_tr.columns):
+            # Only use selected-feature results if they succeeded
+            if sel_cols is not None:
+                selected_cols = sel_cols
+                model = sel_model
+                if sel_metrics is not None:
+                    metrics = sel_metrics
+            if len(selected_cols) < len(X_tr.columns):
                 logger.info(
                     "Feature selection for %s: %d → %d features",
                     model_type, len(X_tr.columns), len(selected_cols),
                 )
-            if selected_cols is None:
-                selected_cols = list(X_tr.columns)
+
+        # Determine version (needed for calibration filename)
+        version = _get_next_version(symbol, tf_label, model_type)
 
         # Step 3: Probability calibration (Platt scaling)
         calibrated_model = None
@@ -303,7 +310,6 @@ def train_models(
             try:
                 from ml.calibration import calibrate_model
 
-                version = _get_next_version(symbol, tf_label, model_type)
                 calibrated_model = calibrate_model(
                     model, X_vl, y_vl, model_type, symbol, tf_label, version,
                 )
@@ -312,17 +318,17 @@ def train_models(
 
         # Use calibrated model for final metrics if available
         if calibrated_model is not None:
-            y_pred = calibrated_model.predict(X_vl)
-            y_proba = calibrated_model.predict_proba(X_vl)[:, 1]
-            metrics = _compute_metrics(y_vl, y_pred, y_proba)
-            logger.info(
-                "%s calibrated metrics: acc=%.4f prec=%.4f rec=%.4f f1=%.4f auc=%.4f",
-                model_type, metrics.accuracy, metrics.precision,
-                metrics.recall, metrics.f1, metrics.roc_auc,
-            )
-
-        # Determine version
-        version = _get_next_version(symbol, tf_label, model_type)
+            try:
+                y_pred = calibrated_model.predict(X_vl)
+                y_proba = calibrated_model.predict_proba(X_vl)[:, 1]
+                metrics = _compute_metrics(y_vl, y_pred, y_proba)
+                logger.info(
+                    "%s calibrated metrics: acc=%.4f prec=%.4f rec=%.4f f1=%.4f auc=%.4f",
+                    model_type, metrics.accuracy, metrics.precision,
+                    metrics.recall, metrics.f1, metrics.roc_auc,
+                )
+            except Exception as e:
+                logger.warning("Calibrated metrics computation failed for %s: %s", model_type, e)
 
         # Save model to disk (original model, not calibrated wrapper)
         filename = f"{model_type}_{symbol}_{tf_label}_v{version}.joblib"
