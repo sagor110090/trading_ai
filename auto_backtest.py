@@ -669,10 +669,14 @@ def run_auto_backtest(
         console.print(f"{'═' * 50}")
 
         try:
-            # If days specified, use full backfill (like backtest_historical.py)
-            if days is not None:
-                weeks = max(1, days // 7)  # Convert days to weeks
-                console.print(f"\n[bold]🔄 Full backfill for {days} days ({weeks} weeks)[/]")
+            # In reset mode or when days specified, always use full backfill
+            # which fetches candles + generates signals end-to-end.
+            # The incremental path only works when candle data already exists.
+            effective_days = days or (28 if reset else None)
+
+            if effective_days is not None:
+                weeks = max(1, effective_days // 7)  # Convert days to weeks
+                console.print(f"\n[bold]🔄 Full backfill for {effective_days} days ({weeks} weeks)[/]")
                 signal_results = backfill_signals(symbol, mode, weeks=weeks, step=12)
 
                 if "error" in signal_results:
@@ -689,7 +693,7 @@ def run_auto_backtest(
                 total_new_candles = "N/A"
 
             else:
-                # 1. Fetch new candles
+                # 1. Fetch new candles (incremental mode)
                 candle_results = fetch_new_candles_for_symbol(
                     client,
                     symbol,
@@ -699,21 +703,14 @@ def run_auto_backtest(
 
                 total_new_candles = sum(candle_results.values())
 
-                if total_new_candles == 0 and not reset:
+                if total_new_candles == 0:
                     console.print("[dim]No new candles — skipping[/]")
                     results["skipped"].append(symbol.value)
                     continue
 
-                # 2. Generate signals
-                if reset:
-                    # In reset mode, replay ALL signals from existing candle data
-                    # (candles are already in DB, signals were deleted)
-                    from_date = datetime.now(tz=timezone.utc) - timedelta(days=days) if days else (
-                        datetime.now(tz=timezone.utc) - timedelta(weeks=4)
-                    )
-                else:
-                    from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
-                signal_results = generate_new_signals(symbol, mode, from_date, skip_duplicates=not reset)
+                # 2. Generate signals for new period
+                from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
+                signal_results = generate_new_signals(symbol, mode, from_date, skip_duplicates=True)
 
                 if "error" in signal_results:
                     console.print(f"[yellow]⚠ Signal generation error: {signal_results['error']}[/]")
