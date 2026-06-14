@@ -189,6 +189,7 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
 
     # Encode trade_mode with one-hot encoding
     trade_mode = getattr(signal, "trade_mode", "") or ""
+    logger.debug("Building feature vector: trade_mode=%r, spread=%r", trade_mode, features.get("spread"))
     for mode in TRADE_MODES:
         features[f"mode_{mode}"] = 1 if trade_mode == mode else 0
 
@@ -209,11 +210,16 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     if feature_cols:
         # Build row dict: get value from features, replace None with default, fall back to default
         row = {}
+        missing_cols = []
         for col in feature_cols:
             val = features.get(col)
             if val is None:
                 val = PREDICT_NAN_DEFAULTS.get(col, 0.0)
+            if col not in features and col not in PREDICT_NAN_DEFAULTS:
+                missing_cols.append(col)
             row[col] = val
+        if missing_cols:
+            logger.warning("Feature columns not in features dict or defaults: %s", missing_cols)
         X = pd.DataFrame([row], columns=feature_cols)
     else:
         X = pd.DataFrame([features])
