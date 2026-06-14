@@ -313,11 +313,11 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
         return None
 
     # Ensemble or single model result
+    model_version = best_version
     if len(probabilities) == 1:
         proba = probabilities[0]
         ml_confidence = signal.confidence * proba
         model_type_str = model_types[0]
-        model_version = best_version
     else:
         # AUC-weighted average probability
         total_weight = sum(auc_weights)
