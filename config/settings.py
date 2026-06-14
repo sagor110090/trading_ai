@@ -251,6 +251,20 @@ class MLConfig:
     drift_detection_enabled: bool = True
     min_signals_for_drift: int = 20
     drift_threshold: float = 0.15
+    # SMOTE oversampling: generate synthetic minority class samples to
+    # balance the dataset (typically ~70% LOSS / ~30% WIN).
+    # Applied only to training data, never validation.
+    use_smote: bool = True
+    # Hyperparameter optimization with Optuna (Bayesian search).
+    # Finds better params than hardcoded defaults. ~50 trials per model.
+    use_tuning: bool = True
+    # Probability calibration via Platt scaling.
+    # Makes predict_proba outputs more accurate (e.g., 0.3 actually
+    # means 30% chance of winning, not an arbitrary score).
+    use_calibration: bool = True
+    # Feature selection: drop features with <1% importance and retrain.
+    # Removes noise from uninformative features (session, mode, spread).
+    use_feature_selection: bool = True
 
 
 @dataclass(frozen=True)
@@ -551,6 +565,12 @@ def load_settings() -> Settings:
     min_signals_for_drift = int(os.getenv("ML_MIN_SIGNALS_FOR_DRIFT", "20"))
     drift_threshold = float(os.getenv("ML_DRIFT_THRESHOLD", "0.15"))
 
+    # ML pipeline enhancements
+    use_smote = os.getenv("ML_USE_SMOTE", "true").lower() == "true"
+    use_tuning = os.getenv("ML_USE_TUNING", "true").lower() == "true"
+    use_calibration = os.getenv("ML_USE_CALIBRATION", "true").lower() == "true"
+    use_feature_selection = os.getenv("ML_USE_FEATURE_SELECTION", "true").lower() == "true"
+
     # Weekly close settings
     weekly_close_enabled = os.getenv("WEEKLY_CLOSE_ENABLED", "true").lower() == "true"
     weekly_close_stop_new_trades = float(os.getenv("WEEKLY_CLOSE_STOP_NEW_TRADES_HOURS", "2.0"))
@@ -596,6 +616,10 @@ def load_settings() -> Settings:
             drift_detection_enabled=drift_detection_enabled,
             min_signals_for_drift=min_signals_for_drift,
             drift_threshold=drift_threshold,
+            use_smote=use_smote,
+            use_tuning=use_tuning,
+            use_calibration=use_calibration,
+            use_feature_selection=use_feature_selection,
         ),
         weekly_close=WeeklyCloseConfig(
             enabled=weekly_close_enabled,

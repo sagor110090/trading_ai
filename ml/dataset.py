@@ -134,13 +134,14 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
 
-    # Encode target: WIN=1, LOSS=0, BREAKEVEN=0.5
-    # BREAKEVEN signals are "close calls" — they contain useful information
-    # that the model can learn from. A 0.5 target means "uncertain outcome".
+    # Encode target: WIN=1, LOSS=0, BREAKEVEN=0
+    # BREAKEVEN signals are treated as LOSS (0) for binary classification.
+    # A breakeven trade didn't profit, so it shouldn't teach the model that
+    # the pattern leads to a win. All models now use binary (0/1) targets.
     target_map = {
         SignalResult.WIN.value: 1.0,
         SignalResult.LOSS.value: 0.0,
-        SignalResult.BREAKEVEN.value: 0.5,
+        SignalResult.BREAKEVEN.value: 0.0,
     }
     df[TARGET_COLUMN] = df["result"].map(target_map).fillna(0.0)
 

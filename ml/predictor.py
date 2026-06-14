@@ -77,6 +77,10 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
     Returns list of (model, feature_columns, model_info) tuples.
     Models with AUC below MIN_ENSEMBLE_AUC or with missing libraries are skipped.
     If loading fails, the model is deactivated and the next one is tried.
+
+    When calibration is enabled and a calibration file exists, the raw model
+    is replaced with its calibrated wrapper (CalibratedClassifierCV) which
+    produces more accurate probability estimates.
     """
     from data.database import get_session
     models = []
@@ -134,6 +138,19 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
                     except Exception:
                         session.rollback()
                     continue
+
+                # Try loading calibration if enabled
+                if ML_CONFIG.use_calibration:
+                    try:
+                        from ml.calibration import load_calibration
+                        calibrated = load_calibration(
+                            meta.model_type, symbol, timeframe, meta.version,
+                        )
+                        if calibrated is not None:
+                            model = calibrated
+                            logger.debug("Using calibrated model for %s v%d", meta.model_type, meta.version)
+                    except Exception as e:
+                        logger.debug("No calibration for %s v%d: %s", meta.model_type, meta.version, e)
 
                 feat_path = filepath.replace(".joblib", "_features.json")
                 if os.path.exists(feat_path):

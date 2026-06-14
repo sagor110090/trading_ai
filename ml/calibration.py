@@ -1,0 +1,107 @@
+"""Probability calibration for ML models using Platt scaling.
+
+Calibration maps raw predict_proba outputs to true probabilities.
+Without calibration, a model outputting 0.15 might actually correspond
+to a 30% win rate. After calibration, 0.15 means 15%.
+
+Uses sklearn's CalibratedClassifierCV with cv="prefit" to fit a
+sigmoid (Platt scaling) calibration on validation data only.
+"""
+
+import json
+import logging
+import os
+
+import joblib
+import numpy as np
+from sklearn.calibration import CalibratedClassifierCV
+
+from config.settings import SETTINGS
+
+logger = logging.getLogger(__name__)
+
+ML_CONFIG = SETTINGS.ml
+MODEL_DIR = ML_CONFIG.model_dir
+
+
+def calibrate_model(
+    model,
+    X_val: np.ndarray | list,
+    y_val: np.ndarray | list,
+    model_type: str,
+    symbol: str,
+    timeframe: str,
+    version: int,
+) -> object | None:
+    """Fit Platt scaling calibration on validation data and save to disk.
+
+    Args:
+        model: Pre-fitted sklearn/xgboost/catboost model.
+        X_val: Validation features.
+        y_val: Validation labels (binary 0/1).
+        model_type: e.g., "xgboost", "histgbrt", "catboost".
+        symbol: e.g., "XAUUSD".
+        timeframe: e.g., "all".
+        version: Model version number.
+
+    Returns:
+        Calibrated model wrapper, or None if calibration fails.
+    """
+    if not ML_CONFIG.use_calibration:
+        logger.info("Calibration disabled, skipping")
+        return None
+
+    try:
+        # Check that we have both classes in validation data
+        unique_classes = np.unique(y_val)
+        if len(unique_classes) < 2:
+            logger.warning(
+                "Cannot calibrate %s: validation has only 1 class (%s), need 2",
+                model_type, unique_classes,
+            )
+            return None
+
+        # Platt scaling (sigmoid calibration)
+        calibrated = CalibratedClassifierCV(model, cv="prefit", method="sigmoid")
+        calibrated.fit(X_val, y_val)
+
+        # Save calibrated model
+        _ensure_model_dir()
+        filename = f"{model_type}_{symbol}_{timeframe or 'all'}_v{version}_calibrated.joblib"
+        filepath = os.path.join(MODEL_DIR, filename)
+        joblib.dump(calibrated, filepath)
+        logger.info("Saved calibration for %s to %s", model_type, filepath)
+
+        return calibrated
+
+    except Exception as e:
+        logger.warning("Calibration failed for %s: %s", model_type, e)
+        return None
+
+
+def load_calibration(
+    model_type: str,
+    symbol: str,
+    timeframe: str,
+    version: int,
+) -> object | None:
+    """Load a saved calibration model from disk.
+
+    Returns:
+        CalibratedClassifierCV model, or None if not found.
+    """
+    filename = f"{model_type}_{symbol}_{timeframe or 'all'}_v{version}_calibrated.joblib"
+    filepath = os.path.join(MODEL_DIR, filename)
+
+    if not os.path.exists(filepath):
+        return None
+
+    try:
+        return joblib.load(filepath)
+    except Exception as e:
+        logger.warning("Failed to load calibration from %s: %s", filepath, e)
+        return None
+
+
+def _ensure_model_dir() -> None:
+    os.makedirs(MODEL_DIR, exist_ok=True)
