@@ -192,16 +192,9 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     for mode in TRADE_MODES:
         features[f"mode_{mode}"] = 1 if trade_mode == mode else 0
 
-    # Build DataFrame with correct feature order
-    if feature_cols:
-        row = {}
-        for col in feature_cols:
-            row[col] = features.get(col, 0.0)
-        X = pd.DataFrame([row])
-    else:
-        X = pd.DataFrame([features])
-
-    # Replace NaN/None with per-column neutral defaults
+    # Build DataFrame with explicit column ordering and guaranteed presence.
+    # Use 0.0 for any feature missing from the signal's feature dict,
+    # and replace None values with their neutral defaults.
     PREDICT_NAN_DEFAULTS = {
         "rsi14": 50.0, "macd_line": 0.0, "macd_signal": 0.0,
         "macd_histogram": 0.0, "momentum_score": 0.0, "trend_strength": 0.0,
@@ -209,13 +202,32 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
         "candle_body_pct": 0.0, "upper_wick_pct": 0.0, "lower_wick_pct": 0.0,
         "spread": 0.0, "atr_ratio": 1.0,
         "session_asian": 0, "session_london": 0, "session_new_york": 0,
+        "session_enc": -1,
         "mode_scalping": 0, "mode_day_trading": 0, "mode_swing": 0,
     }
+
+    if feature_cols:
+        # Build row dict: get value from features, replace None with default, fall back to default
+        row = {}
+        for col in feature_cols:
+            val = features.get(col)
+            if val is None:
+                val = PREDICT_NAN_DEFAULTS.get(col, 0.0)
+            row[col] = val
+        X = pd.DataFrame([row], columns=feature_cols)
+    else:
+        X = pd.DataFrame([features])
+
+    # Fill any remaining NaN/None values
     for col, default in PREDICT_NAN_DEFAULTS.items():
         if col in X.columns:
             X[col] = X[col].fillna(default)
     X = X.fillna(0.0)
     X = X.replace([np.inf, -np.inf], 0.0)
+
+    # Final safety: ensure column order matches what the model expects
+    if feature_cols:
+        X = X[feature_cols]
 
     return X
 
