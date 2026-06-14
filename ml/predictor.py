@@ -152,8 +152,15 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
                     except Exception as e:
                         logger.debug("No calibration for %s v%d: %s", meta.model_type, meta.version, e)
 
+                # Determine feature columns: model's feature_names_in_ is the
+                # source of truth. Fall back to _features.json if unavailable.
+                # This prevents mismatches where _features.json was saved with
+                # fewer columns than the model (e.g., after feature selection
+                # dropped columns but calibration created a new model with all).
                 feat_path = filepath.replace(".joblib", "_features.json")
-                if os.path.exists(feat_path):
+                if hasattr(model, 'feature_names_in_'):
+                    feature_cols = list(model.feature_names_in_)
+                elif os.path.exists(feat_path):
                     with open(feat_path) as f:
                         feature_cols = json.load(f)
                 else:
