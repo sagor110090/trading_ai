@@ -189,7 +189,6 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
 
     # Encode trade_mode with one-hot encoding
     trade_mode = getattr(signal, "trade_mode", "") or ""
-    logger.debug("Building feature vector: trade_mode=%r, spread=%r", trade_mode, features.get("spread"))
     for mode in TRADE_MODES:
         features[f"mode_{mode}"] = 1 if trade_mode == mode else 0
 
@@ -210,17 +209,18 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     if feature_cols:
         # Build row dict: get value from features, replace None with default, fall back to default
         row = {}
-        missing_cols = []
         for col in feature_cols:
             val = features.get(col)
             if val is None:
                 val = PREDICT_NAN_DEFAULTS.get(col, 0.0)
-            if col not in features and col not in PREDICT_NAN_DEFAULTS:
-                missing_cols.append(col)
             row[col] = val
-        if missing_cols:
-            logger.warning("Feature columns not in features dict or defaults: %s", missing_cols)
         X = pd.DataFrame([row], columns=feature_cols)
+        logger.info(
+            "Feature vector: %d cols requested, %d in DataFrame. "
+            "spread=%r, mode_day_trading=%r, trade_mode=%r",
+            len(feature_cols), len(X.columns),
+            row.get("spread"), row.get("mode_day_trading"), trade_mode,
+        )
     else:
         X = pd.DataFrame([features])
 
@@ -274,6 +274,18 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     for model, feature_cols, model_info in models:
         try:
             X = _build_feature_vector(signal, feature_cols)
+            # Debug: log feature alignment details
+            if hasattr(model, 'feature_names_in_'):
+                model_features = list(model.feature_names_in_)
+                input_features = list(X.columns)
+                if model_features != input_features:
+                    logger.warning(
+                        "Feature mismatch for %s v%d: model has %d features, input has %d. "
+                        "Missing from input: %s",
+                        model_info["model_type"], model_info["version"],
+                        len(model_features), len(input_features),
+                        [f for f in model_features if f not in input_features],
+                    )
             proba = model.predict_proba(X)[0, 1]
             probabilities.append(proba)
             auc_weights.append(model_info["roc_auc"])
