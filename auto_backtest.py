@@ -564,18 +564,19 @@ def run_auto_backtest(
         with get_session() as session:
             for symbol in symbols:
                 # Delete verifications first (foreign key constraint)
-                # Use subquery to find signal IDs — SQLAlchemy doesn't allow
-                # .delete() on a query with .join()
-                signal_ids = (
+                # SQLAlchemy doesn't allow .delete() on a query with .join(),
+                # so we fetch signal IDs first and delete by those IDs.
+                signal_ids = [
+                    row[0] for row in
                     session.query(Signal.id)
                     .filter(Signal.symbol == symbol.value)
-                    .subquery()
-                )
+                    .all()
+                ]
                 deleted_verifications = (
                     session.query(SignalVerification)
                     .filter(SignalVerification.signal_id.in_(signal_ids))
                     .delete(synchronize_session=False)
-                )
+                ) if signal_ids else 0
                 # Delete signals
                 deleted_signals = (
                     session.query(Signal)
