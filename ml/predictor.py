@@ -71,6 +71,64 @@ class Prediction:
     feature_count: int
 
 
+def _extract_feature_names(model) -> Optional[list[str]]:
+    """Extract feature names from a model in priority order.
+
+    Checks multiple sources since different model types store features
+    differently. CalibratedClassifierCV wraps the inner model, so we
+    need to check the inner estimators.
+
+    Priority:
+    1. model.feature_names_in_ (sklearn standard)
+    2. model.calibrated_classifiers_[0].estimator.feature_names_in_ (CalibratedClassifierCV inner)
+    3. model.estimator.feature_names_in_ (CalibratedClassifierCV unfitted template — less reliable)
+    4. model.feature_names_ (CatBoost native)
+    5. model.calibrated_classifiers_[0].estimator.feature_names_ (CalibratedCV + CatBoost)
+    6. model.estimator.feature_names_ (CalibratedCV template + CatBoost)
+    """
+    # 1. sklearn standard — set after fit() on XGBClassifier, HistGradientBoosting,
+    #    and CalibratedClassifierCV (which sets it from the fit data)
+    if hasattr(model, 'feature_names_in_'):
+        return list(model.feature_names_in_)
+
+    # 2. CalibratedClassifierCV: check fitted inner estimators
+    #    calibrated_classifiers_ is a list of _CalibratedClassifier instances,
+    #    each with an .estimator attribute that is the fitted base model.
+    if hasattr(model, 'calibrated_classifiers_'):
+        try:
+            inner = model.calibrated_classifiers_[0].estimator
+            if hasattr(inner, 'feature_names_in_'):
+                return list(inner.feature_names_in_)
+            # CatBoost inner estimator
+            if hasattr(inner, 'feature_names_'):
+                cb_features = inner.feature_names_
+                if cb_features is not None and len(cb_features) > 0:
+                    return list(cb_features)
+        except (IndexError, AttributeError):
+            pass
+
+    # 3. CalibratedClassifierCV.estimator (unfitted template)
+    #    Less reliable since it's the constructor arg, not a fitted model,
+    #    but may have feature_names_in_ if it was pre-fitted.
+    if hasattr(model, 'estimator'):
+        inner = model.estimator
+        if hasattr(inner, 'feature_names_in_'):
+            return list(inner.feature_names_in_)
+        # CatBoost template
+        if hasattr(inner, 'feature_names_'):
+            cb_features = inner.feature_names_
+            if cb_features is not None and len(cb_features) > 0:
+                return list(cb_features)
+
+    # 4. CatBoost native feature_names_ (direct model, no wrapper)
+    if hasattr(model, 'feature_names_'):
+        cb_features = model.feature_names_
+        if cb_features is not None and len(cb_features) > 0:
+            return list(cb_features)
+
+    return None
+
+
 def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
     """Load all active models for a symbol/timeframe, ordered by AUC.
 
@@ -153,52 +211,23 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
                         logger.debug("No calibration for %s v%d: %s", meta.model_type, meta.version, e)
 
                 # Determine feature columns from the most reliable source.
-                # Priority: model.feature_names_in_ > inner estimator features >
-                # CatBoost feature_names_ > _features.json
-                # This prevents mismatches in both column count AND column order.
-                feature_cols = None
-                feat_path = filepath.replace(".joblib", "_features.json")
+                # The model itself knows what features it was trained on —
+                # this prevents count and ordering mismatches with _features.json.
+                feature_cols = _extract_feature_names(model)
 
-                # 1. sklearn standard attribute (XGBClassifier, HistGradientBoostingClassifier)
-                if hasattr(model, 'feature_names_in_'):
-                    feature_cols = list(model.feature_names_in_)
+                # Fall back to _features.json sidecar file
+                if feature_cols is None:
+                    feat_path = filepath.replace(".joblib", "_features.json")
+                    if os.path.exists(feat_path):
+                        with open(feat_path) as f:
+                            feature_cols = json.load(f)
 
-                # 2. CalibratedClassifierCV: extract from inner estimator
-                if feature_cols is None and hasattr(model, 'estimator'):
-                    inner = model.estimator
-                    if hasattr(inner, 'feature_names_in_'):
-                        feature_cols = list(inner.feature_names_in_)
-
-                # 3. CatBoost-specific attribute
-                if feature_cols is None and hasattr(model, 'feature_names_'):
-                    cb_features = model.feature_names_
-                    if cb_features is not None and len(cb_features) > 0:
-                        feature_cols = list(cb_features)
-
-                # 4. CalibratedClassifierCV wrapping CatBoost
-                if feature_cols is None and hasattr(model, 'estimator'):
-                    inner = model.estimator
-                    if hasattr(inner, 'feature_names_'):
-                        cb_features = inner.feature_names_
-                        if cb_features is not None and len(cb_features) > 0:
-                            feature_cols = list(cb_features)
-
-                # 5. Fall back to _features.json sidecar file
-                if feature_cols is None and os.path.exists(feat_path):
-                    with open(feat_path) as f:
-                        feature_cols = json.load(f)
-
-                logger.debug(
-                    "Model %s v%d: using %d feature columns from %s",
-                    meta.model_type, meta.version,
-                    len(feature_cols) if feature_cols else 0,
-                    "model attribute" if (hasattr(model, 'feature_names_in_') or
-                        (hasattr(model, 'feature_names_') and model.feature_names_ is not None))
-                    else ("inner estimator" if hasattr(model, 'estimator') and
-                        (hasattr(model.estimator, 'feature_names_in_') or
-                         hasattr(model.estimator, 'feature_names_')))
-                    else "_features.json" if os.path.exists(feat_path) else "none",
-                )
+                if feature_cols:
+                    logger.debug(
+                        "Model %s v%d: %d features from %s",
+                        meta.model_type, meta.version, len(feature_cols),
+                        "model" if _extract_feature_names(model) else "json",
+                    )
 
                 models.append((model, feature_cols, model_info))
 
@@ -248,7 +277,9 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     }
 
     if feature_cols:
-        # Build row dict: get value from features, replace None with default, fall back to default
+        # Build row dict: get value from features, replace None with default,
+        # fall back to default for missing keys. This guarantees every column
+        # the model expects is present, even if the signal doesn't have it.
         row = {}
         for col in feature_cols:
             val = features.get(col)
@@ -256,12 +287,6 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
                 val = PREDICT_NAN_DEFAULTS.get(col, 0.0)
             row[col] = val
         X = pd.DataFrame([row], columns=feature_cols)
-        logger.info(
-            "Feature vector: %d cols requested, %d in DataFrame. "
-            "spread=%r, mode_day_trading=%r, trade_mode=%r",
-            len(feature_cols), len(X.columns),
-            row.get("spread"), row.get("mode_day_trading"), trade_mode,
-        )
     else:
         X = pd.DataFrame([features])
 
@@ -272,7 +297,8 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     X = X.fillna(0.0)
     X = X.replace([np.inf, -np.inf], 0.0)
 
-    # Final safety: ensure column order matches what the model expects
+    # Final safety: ensure column order exactly matches what the model expects.
+    # This is critical for CatBoost which checks feature position, not just name.
     if feature_cols:
         X = X[feature_cols]
 
@@ -315,18 +341,6 @@ def predict_signal(signal: TradeSignal) -> Optional[Prediction]:
     for model, feature_cols, model_info in models:
         try:
             X = _build_feature_vector(signal, feature_cols)
-            # Debug: log feature alignment details
-            if hasattr(model, 'feature_names_in_'):
-                model_features = list(model.feature_names_in_)
-                input_features = list(X.columns)
-                if model_features != input_features:
-                    logger.warning(
-                        "Feature mismatch for %s v%d: model has %d features, input has %d. "
-                        "Missing from input: %s",
-                        model_info["model_type"], model_info["version"],
-                        len(model_features), len(input_features),
-                        [f for f in model_features if f not in input_features],
-                    )
             proba = model.predict_proba(X)[0, 1]
             probabilities.append(proba)
             auc_weights.append(model_info["roc_auc"])
