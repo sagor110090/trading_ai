@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 
@@ -239,6 +240,7 @@ def generate_new_signals(
     symbol: Symbol,
     mode: TradeMode,
     from_date: datetime,
+    skip_duplicates: bool = True,
 ) -> dict:
     """Generate and verify signals only for the new data period.
 
@@ -375,20 +377,21 @@ def generate_new_signals(
 
                 stats["signals"] += 1
 
-                # Duplicate check
-                dup_cutoff = m5_ts - pd.Timedelta(minutes=dup_window)
-                recent_dup = session.query(Signal).filter(
-                    Signal.symbol == symbol.value,
-                    Signal.signal == trade_signal.signal.value,
-                    Signal.entry >= trade_signal.entry * 0.9995,
-                    Signal.entry <= trade_signal.entry * 1.0005,
-                    Signal.timestamp >= dup_cutoff,
-                ).first()
+                # Duplicate check (skip when reset — replaying all signals from scratch)
+                if skip_duplicates:
+                    dup_cutoff = m5_ts - pd.Timedelta(minutes=dup_window)
+                    recent_dup = session.query(Signal).filter(
+                        Signal.symbol == symbol.value,
+                        Signal.signal == trade_signal.signal.value,
+                        Signal.entry >= trade_signal.entry * 0.9995,
+                        Signal.entry <= trade_signal.entry * 1.0005,
+                        Signal.timestamp >= dup_cutoff,
+                    ).first()
 
-                if recent_dup:
-                    stats["skipped_duplicate"] += 1
-                    progress.update(task, advance=step, info="duplicate")
-                    continue
+                    if recent_dup:
+                        stats["skipped_duplicate"] += 1
+                        progress.update(task, advance=step, info="duplicate")
+                        continue
 
                 # Store signal
                 features = trade_signal.features.to_dict()
@@ -589,11 +592,35 @@ def run_auto_backtest(
                     .filter(MLModelMeta.symbol == symbol.value)
                     .delete(synchronize_session=False)
                 )
+                # Delete ML model files on disk (.joblib + _features.json + _calibrated.joblib)
+                model_dir = SETTINGS.ml.model_dir
+                deleted_files = 0
+                if os.path.isdir(model_dir):
+                    for fname in os.listdir(model_dir):
+                        if symbol.value in fname:
+                            fpath = os.path.join(model_dir, fname)
+                            try:
+                                os.remove(fpath)
+                                deleted_files += 1
+                            except OSError as e:
+                                logger.warning("Failed to delete %s: %s", fpath, e)
+                # Delete tuned params files on disk
+                deleted_params = 0
+                if os.path.isdir(model_dir):
+                    for fname in os.listdir(model_dir):
+                        if symbol.value in fname and fname.endswith("_tuned_params.json"):
+                            fpath = os.path.join(model_dir, fname)
+                            try:
+                                os.remove(fpath)
+                                deleted_params += 1
+                            except OSError as e:
+                                logger.warning("Failed to delete %s: %s", fpath, e)
                 session.commit()
                 console.print(
                     f"  [yellow]Deleted[/] {deleted_signals} signals, "
                     f"{deleted_verifications} verifications, "
-                    f"{deleted_models} ML models for {symbol.value}"
+                    f"{deleted_models} ML models, "
+                    f"{deleted_files} model files for {symbol.value}"
                 )
         console.print("[green]✓ Reset complete[/]\n")
 
@@ -677,7 +704,7 @@ def run_auto_backtest(
 
                 # 2. Generate signals for new period
                 from_date = status["last_signal_date"] or (datetime.now(tz=timezone.utc) - timedelta(days=7))
-                signal_results = generate_new_signals(symbol, mode, from_date)
+                signal_results = generate_new_signals(symbol, mode, from_date, skip_duplicates=not reset)
 
                 if "error" in signal_results:
                     console.print(f"[yellow]⚠ Signal generation error: {signal_results['error']}[/]")
