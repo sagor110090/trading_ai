@@ -161,7 +161,7 @@ class ScalpingConfig:
     """Scalping: fast in, fast out. M5 entry, H1 trend only."""
     sl_atr_mult: float = 0.5
     tp_atr_mult: float = 0.8
-    confidence_threshold: float = 20.0  # Lowered for more signals
+    confidence_threshold: float = 30.0  # Raised from 20 for higher quality signals
     trend_timeframe: str = "1h"
     entry_timeframe: str = "5m"
     confluence_label: str = "scalping"
@@ -171,13 +171,13 @@ class ScalpingConfig:
 
 @dataclass(frozen=True)
 class DayTradingConfig:
-    """Day trading: close same day. M5 entry, H1 trend, H4 big picture."""
+    """Day trading: close same day. M5 entry, H1 trend, M15 confirmation."""
     sl_atr_mult: float = 0.7
     tp_atr_mult: float = 1.2
-    confidence_threshold: float = 20.0  # Lowered from 35% for more signals
+    confidence_threshold: float = 30.0  # Raised from 20 for higher quality signals
     trend_timeframe: str = "1h"
     entry_timeframe: str = "5m"
-    big_picture_timeframe: str = "4h"
+    confirmation_timeframe: str = "15m"  # M15 replaces H4 for day trading
     confluence_label: str = "day_trading"
     # Max time a day trade stays open (minutes)
     max_hold_minutes: int = 240
@@ -188,7 +188,7 @@ class SwingConfig:
     """Swing: hold hours to days. H4+H1 must agree, M5 entry trigger."""
     sl_atr_mult: float = 2.0
     tp_atr_mult: float = 3.0
-    confidence_threshold: float = 25.0  # Lowered from 40% for more swing trades
+    confidence_threshold: float = 35.0  # Raised from 25 for higher quality signals
     trend_timeframe: str = "4h"
     confirmation_timeframe: str = "1h"
     entry_timeframe: str = "5m"

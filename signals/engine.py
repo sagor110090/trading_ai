@@ -1,7 +1,7 @@
 """Multi-timeframe confluence signal engine with 3 trade modes.
 
 Scalping:  M5 entry + H1 trend only. Tight stops. Fast in/out.
-Day trade: M5 entry + H1 trend + H4 big picture. Medium stops. Close same day.
+Day trade: M5 entry + H1 trend + M15 confirmation (resampled from M5). Medium stops. Close same day.
 Swing:     H4+H1 must agree + M5 trigger. Wide stops. Hold hours-days.
 """
 
@@ -22,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 WEIGHTS = SETTINGS.signal_weights
 THRESHOLDS = SETTINGS.signal_thresholds
+
+# Spread filter thresholds.
+# If spread/close > HIGH_SPREAD_SKIP (0.5%), skip the signal entirely —
+# entry cost is too high for a profitable trade.
+# If spread/close > MODERATE_SPREAD_PENALTY (0.1%), reduce confidence by
+# SPREAD_PENALTY_POINTS — spread is eating into profit but trade may still work.
+HIGH_SPREAD_SKIP = 0.005     # 0.5% of price → skip signal
+MODERATE_SPREAD_PENALTY = 0.001  # 0.1% of price → reduce confidence
+SPREAD_PENALTY_POINTS = 15.0     # points to subtract when spread is moderate
 
 
 @dataclass(frozen=True)
@@ -189,24 +198,76 @@ def _compute_stop_take(
     return round(stop_loss, 5), round(take_profit, 5)
 
 
-def _get_m5_direction(df_m5: pd.DataFrame) -> tuple[SignalType, float]:
-    """Quick M5 direction check. Returns (direction, momentum_score)."""
+def _get_m5_direction(df_m5: pd.DataFrame) -> tuple[SignalType, float, float]:
+    """Full scoring-based M5 direction check.
+
+    Uses the same scoring engine as H1/H4 but with a minimum confidence gate.
+    Returns (direction, confidence_pct, momentum_score).
+
+    A minimum confidence of 15% is required to confirm M5 direction.
+    This prevents choppy M5 candles from overriding H1/H4 trends.
+    """
     if df_m5.empty or len(df_m5) < 50:
-        return SignalType.NO_TRADE, 0.0
+        return SignalType.NO_TRADE, 0.0, 0.0
 
-    m5_features = compute_all_features(df_m5)
-    m5_last = m5_features.iloc[-1]
-    m5_momentum = float(m5_last.get("momentum_score", 0))
+    m5_dir, m5_scores, m5_feat, _ = _get_direction_from_df(df_m5)
+    m5_momentum = float(m5_feat.momentum_score or 0)
 
-    if pd.isna(m5_last.get("ema20")):
-        return SignalType.NO_TRADE, m5_momentum
+    if m5_dir == SignalType.NO_TRADE:
+        return SignalType.NO_TRADE, 0.0, m5_momentum
 
-    if m5_last["close"] > m5_last["ema20"] and m5_momentum > 0:
-        return SignalType.BUY, m5_momentum
-    elif m5_last["close"] < m5_last["ema20"] and m5_momentum < 0:
-        return SignalType.SELL, m5_momentum
+    # Minimum confidence gate: M5 must have meaningful direction strength
+    m5_confidence = min(m5_scores.total / WEIGHTS.total * 100.0, 100.0)
+    if m5_confidence < 15.0:
+        logger.debug(
+            "M5 direction %s too weak (%.1f%% < 15%%) — treating as NO_TRADE",
+            m5_dir.value, m5_confidence,
+        )
+        return SignalType.NO_TRADE, m5_confidence, m5_momentum
 
-    return SignalType.NO_TRADE, m5_momentum
+    return m5_dir, m5_confidence, m5_momentum
+
+
+def _apply_spread_filter(
+    confidence: float,
+    features: FeatureSet,
+    symbol: Symbol,
+) -> tuple[float, bool]:
+    """Apply spread filter to reduce or skip signals with wide spreads.
+
+    Returns (adjusted_confidence, should_skip).
+    If should_skip is True, the signal should be discarded entirely.
+    If should_skip is False, confidence may still be reduced for moderate spreads.
+    """
+    spread = features.spread
+    # For the entry price, use a rough estimate from close price.
+    # We need a price reference — use the feature set's EMA20 as proxy.
+    close_proxy = features.ema20 or 0
+
+    if not spread or spread <= 0 or close_proxy <= 0:
+        # No spread data available — don't penalize
+        return confidence, False
+
+    spread_pct = spread / close_proxy
+
+    if spread_pct > HIGH_SPREAD_SKIP:
+        # Spread is too wide — skip this signal entirely
+        logger.info(
+            "Spread filter: %s spread too wide (%.4f > %.4f) — skipping signal",
+            symbol.value, spread_pct, HIGH_SPREAD_SKIP,
+        )
+        return confidence, True
+
+    if spread_pct > MODERATE_SPREAD_PENALTY:
+        # Moderate spread — reduce confidence
+        adjusted = confidence - SPREAD_PENALTY_POINTS
+        logger.info(
+            "Spread filter: %s spread moderate (%.4f > %.4f) — confidence %.1f -> %.1f",
+            symbol.value, spread_pct, MODERATE_SPREAD_PENALTY, confidence, adjusted,
+        )
+        return max(0.0, adjusted), False
+
+    return confidence, False
 
 
 # ── SCALPING ──────────────────────────────────────────────────────────────────
@@ -237,9 +298,9 @@ def generate_signal_scalping(
         return None
 
     h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_momentum = _get_m5_direction(df_m5)
+    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
 
-    logger.info("Scalping: H1=%s M5=%s (M5 mom=%.1f)", h1_dir.value, m5_dir.value, m5_momentum)
+    logger.info("Scalping: H1=%s M5=%s (M5 conf=%.1f%% mom=%.1f)", h1_dir.value, m5_dir.value, m5_conf, m5_momentum)
 
     # H1 must have a direction
     if h1_dir == SignalType.NO_TRADE:
@@ -263,6 +324,12 @@ def generate_signal_scalping(
         confluence_bonus += 3.0  # M5 neutral is OK for scalping
 
     confidence = max(0.0, min(100.0, base_confidence + confluence_bonus))
+
+    # Spread filter: reduce confidence or skip signal for wide spreads
+    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
+    if skip:
+        logger.info("Scalping: skipped — spread too wide")
+        return None
 
     if confidence < cfg.confidence_threshold:
         logger.info("Scalping: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
@@ -298,6 +365,44 @@ def generate_signal_scalping(
 
 # ── DAY TRADING ───────────────────────────────────────────────────────────────
 
+def _resample_m5_to_m15(df_m5: pd.DataFrame) -> pd.DataFrame:
+    """Resample M5 candle data to M15 for smoother confirmation.
+
+    Groups every 3 consecutive M5 candles into one M15 candle.
+    Requires at least 3 rows and a 'timestamp' column.
+    Returns empty DataFrame if resampling fails.
+    """
+    if df_m5.empty or len(df_m5) < 3:
+        return pd.DataFrame()
+
+    try:
+        df = df_m5.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.set_index("timestamp")
+
+        agg_dict = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+        }
+        # Only include volume/spread if present
+        if "volume" in df.columns:
+            agg_dict["volume"] = "sum"
+        if "spread" in df.columns:
+            agg_dict["spread"] = "mean"
+
+        m15 = df.resample("15min").agg(agg_dict)
+        # Drop rows where OHLC is missing (incomplete 15-min windows)
+        m15 = m15.dropna(subset=["open", "high", "low", "close"])
+
+        m15 = m15.reset_index()
+        return m15
+    except Exception as e:
+        logger.warning("Failed to resample M5 to M15: %s", e)
+        return pd.DataFrame()
+
+
 def generate_signal_day_trading(
     df_h4: pd.DataFrame,
     df_h1: pd.DataFrame,
@@ -306,14 +411,17 @@ def generate_signal_day_trading(
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Day trading signal: M5 entry in H1 trend direction, H4 as confirmation.
+    """Day trading signal: M5 entry in H1 trend direction, M15 confirmation.
+
+    Timeframes: H1 = trend direction, M15 = confirmation, M5 = entry timing.
+    M15 is resampled from M5 data (no separate candle fetch needed).
 
     Rules:
-    - H1 provides trend direction
-    - H4 opposition penalises confidence (no longer hard-blocks)
+    - H1 provides trend direction (the boss)
+    - M15 opposition penalises confidence (smoother than M5, avoids noise)
     - M5 momentum must agree for entry timing
-    - Medium stops: 1x ATR SL, 1.5x ATR TP
-    - Threshold: 20%
+    - Medium stops: per-symbol SL/TP multipliers
+    - Threshold: 30%
     """
     cfg = SETTINGS.day_trading
 
@@ -322,16 +430,18 @@ def generate_signal_day_trading(
         return None
 
     h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_momentum = _get_m5_direction(df_m5)
+    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
 
-    # H4 check — only needed to avoid counter-trend
-    h4_dir = SignalType.NO_TRADE
-    if not df_h4.empty and len(df_h4) >= 200:
-        h4_dir, _, _, _ = _get_direction_from_df(df_h4)
+    # Resample M5 → M15 for confirmation (smoother than raw M5)
+    df_m15 = _resample_m5_to_m15(df_m5)
+    m15_dir = SignalType.NO_TRADE
+    m15_scores = None
+    if not df_m15.empty and len(df_m15) >= 50:
+        m15_dir, m15_scores, _, _ = _get_direction_from_df(df_m15)
 
     logger.info(
-        "Day trade: H4=%s H1=%s M5=%s",
-        h4_dir.value, h1_dir.value, m5_dir.value,
+        "Day trade: M15=%s H1=%s M5=%s (M5 conf=%.1f%%)",
+        m15_dir.value, h1_dir.value, m5_dir.value, m5_conf,
     )
 
     # H1 must have a direction
@@ -339,15 +449,14 @@ def generate_signal_day_trading(
         logger.info("Day trade: H1 NO_TRADE")
         return None
 
-    # H4 opposition penalises confidence instead of hard-blocking.
-    # This allows signals during trend transitions (H4 pullback vs H1 bounce)
-    # while still penalising counter-big-picture trades.
-    h4_penalty = 0.0
-    h4_opposes = False
-    if h4_dir != SignalType.NO_TRADE and h4_dir != h1_dir:
-        h4_penalty = -12.0
-        h4_opposes = True
-        logger.info("Day trade: H4=%s opposes H1=%s — penalty -12%%", h4_dir.value, h1_dir.value)
+    # M15 confirmation penalty/bonus (replaces H4 role)
+    # M15 is smoother than M5, so it provides a more reliable mid-term direction
+    m15_penalty = 0.0
+    m15_opposes = False
+    if m15_dir != SignalType.NO_TRADE and m15_dir != h1_dir:
+        m15_penalty = -10.0
+        m15_opposes = True
+        logger.info("Day trade: M15=%s opposes H1=%s — penalty -10%%", m15_dir.value, h1_dir.value)
 
     # M5 must agree or be neutral
     if m5_dir != SignalType.NO_TRADE and m5_dir != h1_dir:
@@ -359,19 +468,25 @@ def generate_signal_day_trading(
     confluence_bonus = 0.0
     confluence_label = cfg.confluence_label
 
-    # H4 alignment bonus or opposition label
-    if h4_dir == h1_dir and h4_dir != SignalType.NO_TRADE:
+    # M15 alignment bonus or opposition label
+    if m15_dir == h1_dir and m15_dir != SignalType.NO_TRADE:
         confluence_bonus += 8.0
-        confluence_label = f"{cfg.confluence_label}+h4"
-    elif h4_opposes:
-        confluence_label = f"{cfg.confluence_label}_vs_h4"
+        confluence_label = f"{cfg.confluence_label}+m15"
+    elif m15_opposes:
+        confluence_label = f"{cfg.confluence_label}_vs_m15"
 
     # M5 alignment bonus
     if m5_dir == h1_dir:
         confluence_bonus += 6.0
         confluence_label = f"{confluence_label}+m5"
 
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + h4_penalty + m5_penalty))
+    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + m15_penalty + m5_penalty))
+
+    # Spread filter: reduce confidence or skip signal for wide spreads
+    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
+    if skip:
+        logger.info("Day trade: skipped — spread too wide")
+        return None
 
     if confidence < cfg.confidence_threshold:
         logger.info("Day trade: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
@@ -397,7 +512,7 @@ def generate_signal_day_trading(
         timestamp=df_h1.iloc[-1]["timestamp"],
         features=h1_feat,
         factor_scores=h1_scores,
-        h4_direction=h4_dir.value,
+        h4_direction=m15_dir.value,  # M15 confirmation stored in h4_direction field
         h1_direction=h1_dir.value,
         m5_direction=m5_dir.value,
         confluence=confluence_label,
@@ -432,9 +547,9 @@ def generate_signal_swing(
 
     h4_dir, h4_scores, h4_feat, _ = _get_direction_from_df(df_h4)
     h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_momentum = _get_m5_direction(df_m5)
+    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
 
-    logger.info("Swing: H4=%s H1=%s M5=%s", h4_dir.value, h1_dir.value, m5_dir.value)
+    logger.info("Swing: H4=%s H1=%s M5=%s (M5 conf=%.1f%%)", h4_dir.value, h1_dir.value, m5_dir.value, m5_conf)
 
     # H4 and H1 must both have a direction
     if h4_dir == SignalType.NO_TRADE or h1_dir == SignalType.NO_TRADE:
@@ -480,6 +595,12 @@ def generate_signal_swing(
         confluence_label = f"{confluence_label}_vs_m5"
 
     confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + h4_h1_penalty))
+
+    # Spread filter: reduce confidence or skip signal for wide spreads
+    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
+    if skip:
+        logger.info("Swing: skipped — spread too wide")
+        return None
 
     if confidence < cfg.confidence_threshold:
         logger.info("Swing: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)

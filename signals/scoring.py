@@ -3,6 +3,13 @@
 Direction is determined by the EMA trend (the primary directional indicator).
 If EMAs show a clear trend, that's the direction — even if RSI or MACD are neutral.
 RSI and MACD contribute to confidence (strength) but shouldn't veto direction.
+
+Improvements over previous version:
+- Removed "weak alignment" tier (close > ema20 alone) that was too permissive
+- Added flat/choppy market detection: NO_TRADE when EMAs are nearly flat
+- RSI scoring is now directional: confirms/contradicts instead of always positive
+- Trend strength gate: penalizes signals in weak/flat markets
+- Partial alignment scores lower (15% vs 65%) to reduce low-quality signals
 """
 
 import logging
@@ -18,6 +25,11 @@ logger = logging.getLogger(__name__)
 WEIGHTS = SETTINGS.signal_weights
 THRESHOLDS = SETTINGS.signal_thresholds
 
+# Minimum EMA separation to consider a trend valid.
+# If |ema20 - ema50| / close < this, the market is flat/choppy → NO_TRADE.
+FLAT_MARKET_THRESHOLD = 0.001  # 0.1% price separation = flat market
+VERY_FLAT_THRESHOLD = 0.0003   # 0.03% = extremely flat, hard NO_TRADE
+
 
 @dataclass(frozen=True)
 class FactorScores:
@@ -32,54 +44,88 @@ class FactorScores:
 
 
 def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float) -> float:
-    """Score EMA trend alignment. Returns 0 to WEIGHTS.ema_trend."""
-    if pd.isna(ema20) or pd.isna(ema50) or pd.isna(ema200):
+    """Score EMA trend alignment. Returns 0 to WEIGHTS.ema_trend.
+
+    Two-tier scoring (weak alignment removed — too many false signals):
+    - Strong: all 3 EMAs aligned + price above/below → full score
+    - Partial: EMA20 > EMA50 + price confirms → 50% score
+    - Flat market: EMAs too close together → 0 (NO_TRADE handled elsewhere)
+    """
+    if pd.isna(ema20) or pd.isna(ema50) or close == 0:
         return 0.0
 
-    score = 0.0
     max_score = WEIGHTS.ema_trend
+    ema_spread = abs(ema20 - ema50) / close
 
-    # Full alignment
-    if ema20 > ema50 > ema200 and close > ema20:
-        score = max_score
-    elif ema20 < ema50 < ema200 and close < ema20:
-        score = max_score
-    # Partial alignment
-    elif ema20 > ema50 and close > ema20:
-        score = max_score * 0.65
-    elif ema20 < ema50 and close < ema20:
-        score = max_score * 0.65
-    # Weak alignment
-    elif close > ema20:
-        score = max_score * 0.3
-    elif close < ema20:
-        score = max_score * 0.3
+    # Check for flat/choppy market: EMAs too close together
+    if ema_spread < FLAT_MARKET_THRESHOLD:
+        return 0.0
 
-    return score
+    # Strong alignment: all 3 EMAs agree + price confirms
+    if not pd.isna(ema200):
+        if ema20 > ema50 > ema200 and close > ema20:
+            return max_score
+        if ema20 < ema50 < ema200 and close < ema20:
+            return max_score
+
+    # Partial alignment: EMA20 and EMA50 agree + price confirms
+    if ema20 > ema50 and close > ema20:
+        return max_score * 0.5
+    if ema20 < ema50 and close < ema20:
+        return max_score * 0.5
+
+    # No clear alignment → score 0 (direction will be NO_TRADE or MACD fallback)
+    return 0.0
 
 
-def _score_rsi(rsi: float) -> float:
-    """Score RSI factor. Returns 0 to WEIGHTS.rsi.
+def _score_rsi(rsi: float, direction: SignalType) -> float:
+    """Score RSI factor — DIRECTIONAL. Returns -WEIGHTS.rsi to +WEIGHTS.rsi.
 
-    Scores signal STRENGTH, not direction.
-    Overbought/oversold = strong signal, neutral = weak signal.
+    RSI now contributes positively when confirming direction and
+    negatively when contradicting. Neutral zone (40-60) scores 0.
+    This prevents RSI from inflating confidence in directionless markets.
     """
     if pd.isna(rsi):
         return 0.0
 
     max_score = WEIGHTS.rsi
 
-    # Strong zones
-    if rsi <= 20:
-        return max_score
-    elif rsi <= 30:
-        return max_score * (30 - rsi) / 10.0
-    elif rsi >= 80:
-        return max_score
-    elif rsi >= 70:
-        return max_score * (rsi - 70) / 10.0
-    # Neutral zone — still scores a little (signal exists, just not strong)
-    return max_score * 0.1
+    if direction == SignalType.BUY:
+        # BUY signals: low RSI is bullish (oversold = bounce potential)
+        if rsi <= 25:
+            return max_score  # Strongly oversold — great buy signal
+        elif rsi <= 35:
+            return max_score * 0.7  # Moderately oversold
+        elif rsi <= 45:
+            return max_score * 0.3  # Slightly favorable
+        elif rsi <= 55:
+            return 0.0  # Neutral — RSI adds nothing
+        elif rsi <= 65:
+            return -max_score * 0.3  # Slightly overbought — caution
+        elif rsi <= 75:
+            return -max_score * 0.5  # Overbought — risky buy
+        else:
+            return -max_score  # Extremely overbought — strong warning
+
+    elif direction == SignalType.SELL:
+        # SELL signals: high RSI is bearish (overbought = drop potential)
+        if rsi >= 75:
+            return max_score  # Strongly overbought — great sell signal
+        elif rsi >= 65:
+            return max_score * 0.7  # Moderately overbought
+        elif rsi >= 55:
+            return max_score * 0.3  # Slightly favorable
+        elif rsi >= 45:
+            return 0.0  # Neutral — RSI adds nothing
+        elif rsi >= 35:
+            return -max_score * 0.3  # Slightly oversold — caution
+        elif rsi >= 25:
+            return -max_score * 0.5  # Oversold — risky sell
+        else:
+            return -max_score  # Extremely oversold — strong warning
+
+    # NO_TRADE direction — RSI doesn't contribute
+    return 0.0
 
 
 def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float:
@@ -90,7 +136,7 @@ def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float
     max_score = WEIGHTS.macd
     score = 0.0
 
-    # Histogram direction and magnitude (tanh squash preserves magnitude)
+    # Histogram magnitude (tanh squash preserves magnitude)
     hist_abs = abs(macd_hist)
     if hist_abs > 0:
         magnitude = np.tanh(hist_abs / 2.0)
@@ -152,13 +198,32 @@ def _score_momentum(momentum_score: float, trend_strength: float) -> float:
     return max_score * alignment * magnitude
 
 
+def _is_flat_market(ema20: float, ema50: float, close: float) -> bool:
+    """Check if EMAs are too flat to generate a reliable signal.
+
+    Returns True if |ema20 - ema50| / close < FLAT_MARKET_THRESHOLD,
+    meaning the market is in a tight range and trend direction is unreliable.
+    """
+    if pd.isna(ema20) or pd.isna(ema50) or close == 0:
+        return False
+    ema_spread = abs(ema20 - ema50) / close
+    return ema_spread < FLAT_MARKET_THRESHOLD
+
+
 def _determine_ema_direction(ema20: float, ema50: float, ema200: float, close: float) -> SignalType:
     """Determine direction from EMA alignment.
 
-    EMAs are the primary direction indicator. If price is above key EMAs → BUY.
-    If price is below key EMAs → SELL. If EMAs are mixed → NO_TRADE.
+    Two-tier system (no weak alignment):
+    - Strong: all 3 EMAs agree + price confirms → BUY/SELL
+    - Partial: EMA20 > EMA50 + price confirms → BUY/SELL
+    - Flat market: EMAs too close → NO_TRADE
+    - Mixed/unclear: MACD fallback
     """
     if pd.isna(ema20) or pd.isna(ema50):
+        return SignalType.NO_TRADE
+
+    # Flat market check: EMAs too close together = no clear trend
+    if close > 0 and abs(ema20 - ema50) / close < FLAT_MARKET_THRESHOLD:
         return SignalType.NO_TRADE
 
     # Strong alignment: all EMAs agree
@@ -172,12 +237,6 @@ def _determine_ema_direction(ema20: float, ema50: float, ema200: float, close: f
     if ema20 > ema50 and close > ema20:
         return SignalType.BUY
     if ema20 < ema50 and close < ema20:
-        return SignalType.SELL
-
-    # Weak: price vs EMA20 only
-    if close > ema20:
-        return SignalType.BUY
-    if close < ema20:
         return SignalType.SELL
 
     return SignalType.NO_TRADE
@@ -203,11 +262,8 @@ def compute_signal_scores(
 
     Direction is primarily determined by EMA trend alignment.
     Confidence (total score) measures HOW STRONG the signal is.
-    RSI and MACD affect confidence but don't override EMA direction.
-
-    This means: if EMAs say BUY but RSI is neutral (40-60), we still get BUY
-    with moderate confidence. The old logic would give NO_TRADE because
-    neutral RSI voted for neither side.
+    RSI is now directional — confirming RSI adds, contradicting RSI subtracts.
+    Flat markets (EMA20 ≈ EMA50) produce NO_TRADE.
     """
     # Direction from EMAs (primary)
     direction = _determine_ema_direction(ema20, ema50, ema200, close)
@@ -226,7 +282,7 @@ def compute_signal_scores(
 
     # Compute all factor scores
     ema_score = _score_ema_trend(ema20, ema50, ema200, close)
-    rsi_score = _score_rsi(rsi)
+    rsi_score = _score_rsi(rsi, direction)  # Now directional
     macd_score = _score_macd(macd_histogram, macd_line, macd_signal)
     atr_score = _score_atr(atr, close)
     struct_score = _score_structure(candle_body_pct, upper_wick_pct, lower_wick_pct)
@@ -234,7 +290,7 @@ def compute_signal_scores(
 
     total = ema_score + rsi_score + macd_score + atr_score + struct_score + mom_score
 
-    # Adjust total based on direction confirmation from RSI and MACD
+    # Direction confirmation bonus from RSI and MACD
     # These add/subtract from confidence, they don't veto direction
     confirmation_bonus = 0.0
 
@@ -267,6 +323,18 @@ def compute_signal_scores(
             confirmation_bonus -= 5.0
 
     total = max(0.0, total + confirmation_bonus)
+
+    # Flat market penalty: if EMAs are close but not flat enough for NO_TRADE,
+    # reduce confidence to reflect weak trend
+    if close > 0 and not pd.isna(ema20) and not pd.isna(ema50):
+        ema_spread = abs(ema20 - ema50) / close
+        if FLAT_MARKET_THRESHOLD <= ema_spread < FLAT_MARKET_THRESHOLD * 2:
+            # Weak trend: reduce confidence by 30%
+            total *= 0.7
+            logger.debug(
+                "Weak trend penalty: ema_spread=%.4f (< %.4f), confidence × 0.7",
+                ema_spread, FLAT_MARKET_THRESHOLD * 2,
+            )
 
     scores = FactorScores(
         ema_trend=ema_score,
