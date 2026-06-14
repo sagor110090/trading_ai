@@ -152,19 +152,53 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
                     except Exception as e:
                         logger.debug("No calibration for %s v%d: %s", meta.model_type, meta.version, e)
 
-                # Determine feature columns: model's feature_names_in_ is the
-                # source of truth. Fall back to _features.json if unavailable.
-                # This prevents mismatches where _features.json was saved with
-                # fewer columns than the model (e.g., after feature selection
-                # dropped columns but calibration created a new model with all).
+                # Determine feature columns from the most reliable source.
+                # Priority: model.feature_names_in_ > inner estimator features >
+                # CatBoost feature_names_ > _features.json
+                # This prevents mismatches in both column count AND column order.
+                feature_cols = None
                 feat_path = filepath.replace(".joblib", "_features.json")
+
+                # 1. sklearn standard attribute (XGBClassifier, HistGradientBoostingClassifier)
                 if hasattr(model, 'feature_names_in_'):
                     feature_cols = list(model.feature_names_in_)
-                elif os.path.exists(feat_path):
+
+                # 2. CalibratedClassifierCV: extract from inner estimator
+                if feature_cols is None and hasattr(model, 'estimator'):
+                    inner = model.estimator
+                    if hasattr(inner, 'feature_names_in_'):
+                        feature_cols = list(inner.feature_names_in_)
+
+                # 3. CatBoost-specific attribute
+                if feature_cols is None and hasattr(model, 'feature_names_'):
+                    cb_features = model.feature_names_
+                    if cb_features is not None and len(cb_features) > 0:
+                        feature_cols = list(cb_features)
+
+                # 4. CalibratedClassifierCV wrapping CatBoost
+                if feature_cols is None and hasattr(model, 'estimator'):
+                    inner = model.estimator
+                    if hasattr(inner, 'feature_names_'):
+                        cb_features = inner.feature_names_
+                        if cb_features is not None and len(cb_features) > 0:
+                            feature_cols = list(cb_features)
+
+                # 5. Fall back to _features.json sidecar file
+                if feature_cols is None and os.path.exists(feat_path):
                     with open(feat_path) as f:
                         feature_cols = json.load(f)
-                else:
-                    feature_cols = None
+
+                logger.debug(
+                    "Model %s v%d: using %d feature columns from %s",
+                    meta.model_type, meta.version,
+                    len(feature_cols) if feature_cols else 0,
+                    "model attribute" if (hasattr(model, 'feature_names_in_') or
+                        (hasattr(model, 'feature_names_') and model.feature_names_ is not None))
+                    else ("inner estimator" if hasattr(model, 'estimator') and
+                        (hasattr(model.estimator, 'feature_names_in_') or
+                         hasattr(model.estimator, 'feature_names_')))
+                    else "_features.json" if os.path.exists(feat_path) else "none",
+                )
 
                 models.append((model, feature_cols, model_info))
 
