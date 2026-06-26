@@ -307,33 +307,25 @@ python main.py --loop --interval 300
 ### Historical Backfill
 
 ```bash
-# Default: 4 weeks, every M5 candle
+# Backtest & ML training (single entry point)
+# Default: auto-detect stale symbols, incrementally update & train
 python backtest_historical.py
 
-# Options
---weeks 4               # Weeks of historical data
---step 1                # M5 candles per step (1=5min, 12=1hr)
---mode day_trading      # Override trade mode
---symbol ETHUSD         # Specific symbol
---reset                 # Clear existing signals & ML models first
+# Full backfill over a fixed range, then train
+python backtest_historical.py --weeks 4 --step 1
+python backtest_historical.py --days 30 --symbol XAUUSD --reset
 
-# Examples
-python backtest_historical.py --weeks 4 --symbol ETHUSD
-python backtest_historical.py --symbol EURUSD --mode scalping --reset
+# Train ML only from existing verified signals (no backfill)
+python backtest_historical.py --train --symbol XAUUSD
+
+# Force update all symbols regardless of staleness
+python backtest_historical.py --force
 ```
 
 ### ML Model Management
 
-```bash
-# Retrain all models manually (with class weights for imbalance)
-python retrain_ml.py
-
-# Retrain specific symbol/model
-python retrain_ml.py --symbols BTCUSD XAUUSD --models catboost
-
-# Check database statistics
-python check_db_stats.py
-```
+ML models are trained via walk-forward cross-validation in `backtesting/walk_forward.py`,
+triggered automatically after a backfill completes, or manually with `--train`.
 
 ### View Signals
 

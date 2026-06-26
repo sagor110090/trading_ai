@@ -21,11 +21,13 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from config.settings import SETTINGS, Symbol, TradeMode, TradingPlatform
+if TYPE_CHECKING:
+    from data.mt5_client import MT5Client
+
+from config.settings import SETTINGS, Symbol, TradeMode
 from config.utils import broker_symbol, normalize_symbol
-from data.collector import CapitalComClient
 from data.database import get_session
 from data.models import Signal
 from trade.executor import (
@@ -108,7 +110,7 @@ class PositionManager:
     - Deduplicate signal storage (don't store redundant signals)
     """
 
-    def __init__(self, client: CapitalComClient):
+    def __init__(self, client: "MT5Client"):
         self.client = client
         self.cooldowns: list[CooldownEntry] = []
         self._broker_positions: list[OpenPosition] = []
@@ -522,20 +524,11 @@ class PositionManager:
 
     @staticmethod
     def _get_epic(symbol: str) -> Optional[str]:
-        """Get the broker symbol identifier for the active platform.
+        """Get the broker symbol identifier for MetaTrader 5.
 
-        For MT5, adds 'm' suffix for broker communication.
-        For Capital.com, maps to the epic identifier.
+        MT5 broker uses 'm' suffix (e.g., XAUUSDm).
         """
-        if SETTINGS.trading_platform == TradingPlatform.MT5:
-            # MT5 broker uses 'm' suffix (e.g., BTCUSDm)
-            return broker_symbol(symbol)
-        from data.collector import _EPIC_MAP
-        try:
-            symbol_enum = Symbol(symbol)
-            return _EPIC_MAP.get(symbol_enum)
-        except (ValueError, KeyError):
-            return None
+        return broker_symbol(symbol)
 
     def canonicalize_symbol(self, symbol: str) -> str:
         """Resolve broker/strategy symbol variants to the configured symbol key."""

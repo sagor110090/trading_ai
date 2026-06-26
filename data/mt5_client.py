@@ -26,26 +26,6 @@ _TIMEFRAME_MAP: dict[Timeframe, str] = {
 # MT5 symbol names (may differ from Capital.com)
 _SYMBOL_MAP: dict[Symbol, str] = {
     Symbol.XAUUSD: "XAUUSD",
-    Symbol.BTCUSD: "BTCUSD",
-    Symbol.ETHUSD: "ETHUSD",
-    Symbol.SOLUSD: "SOLUSD",
-    Symbol.EURUSD: "EURUSD",
-    Symbol.GBPUSD: "GBPUSD",
-    # Additional forex pairs
-    Symbol.USDJPY: "USDJPY",
-    Symbol.USDCHF: "USDCHF",
-    Symbol.EURGBP: "EURGBP",
-    Symbol.EURJPY: "EURJPY",
-    Symbol.GBPJPY: "GBPJPY",
-    Symbol.AUDUSD: "AUDUSD",
-    Symbol.NZDUSD: "NZDUSD",
-    Symbol.USDCAD: "USDCAD",
-    # Metals
-    Symbol.XAGUSD: "XAGUSD",
-    # Indices
-    Symbol.US30: "US30",
-    Symbol.US500: "US500",
-    Symbol.NAS100: "NAS100",
 }
 
 

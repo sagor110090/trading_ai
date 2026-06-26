@@ -61,6 +61,13 @@ def apply_smote(
         smote = SMOTE(sampling_strategy="auto", k_neighbors=k_neighbors, random_state=42)
         X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
 
+        # SMOTE generates fractional values for one-hot encoded columns
+        # (e.g., session_asian=0.4), which breaks the binary semantics.
+        # Round one-hot columns back to {0, 1} so synthetic samples are valid.
+        onehot_cols = [c for c in X_resampled.columns if c.startswith("session_") or c.startswith("mode_")]
+        for col in onehot_cols:
+            X_resampled[col] = X_resampled[col].round().astype(int)
+
         new_pos = int((y_resampled == 1).sum())
         new_neg = int((y_resampled == 0).sum())
         logger.info(

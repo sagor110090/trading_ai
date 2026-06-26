@@ -70,25 +70,26 @@ def calibrate_model(
             )
             return None
 
-        # Need enough samples for cv=2 (at least 2 per class)
+        # Need enough samples for cv=3 (at least 3 per class for 3-fold calibration)
         class_counts = np.bincount(y_val.astype(int))
         min_class_count = min(class_counts[class_counts > 0])
-        if min_class_count < 2:
+        if min_class_count < 3:
             logger.warning(
-                "Cannot calibrate %s: minority class has only %d samples, need >= 2",
+                "Cannot calibrate %s: minority class has only %d samples, need >= 3",
                 model_type, min_class_count,
             )
             return None
 
-        # Get the model class to create a fresh instance for calibration
-        model_class = type(model)
-        model_params = model.get_params()
+        # Freeze the already-trained model so CalibratedClassifierCV keeps it
+        # and ONLY fits the calibration layer (Platt sigmoid) on validation data.
+        # The previous approach (cv=2 + model_class(**model_params)) discarded
+        # the trained model and refit a fresh one on the small validation set,
+        # producing a weaker calibrated model.
+        from sklearn.frozen import FrozenEstimator
 
-        # CalibratedClassifierCV with cv=2 refits the base estimator internally.
-        # We pass the same params so it creates an identical base model.
         calibrated = CalibratedClassifierCV(
-            estimator=model_class(**model_params),
-            cv=2,
+            estimator=FrozenEstimator(model),
+            cv=3,
             method="sigmoid",
         )
         calibrated.fit(X_val, y_val)

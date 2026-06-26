@@ -60,25 +60,18 @@ def _ensure_model_dir() -> None:
     os.makedirs(MODEL_DIR, exist_ok=True)
 
 
-def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
+def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series, params: Optional[dict] = None) -> dict:
     """Train XGBoost classifier and return metrics.
 
-    Targets are binary (0=LOSS, 1=WIN). BREAKEVEN signals are mapped to 0 (LOSS)
-    in the dataset builder since they didn't profit.
+    Targets are binary (0=LOSS, 1=WIN). Class imbalance is handled by SMOTE
+    upstream (apply_smote), so we do NOT apply scale_pos_weight here —
+    double-balancing (SMOTE + class weights) over-corrects toward WIN and
+    inflates probabilities.
     """
     from xgboost import XGBClassifier
 
-    # Dynamically compute scale_pos_weight from training data to handle class
-    # imbalance (typically ~70% losses, ~30% wins). This overrides any static
-    # value in ML_CONFIG.xgboost.
-    neg_count = int((y_train == 0).sum())
-    pos_count = int((y_train == 1).sum())
-    spw = neg_count / pos_count if pos_count > 0 else 1.0
-
-    params = {**ML_CONFIG.xgboost, "scale_pos_weight": spw}
-    logger.info("XGBoost: scale_pos_weight=%.2f (neg=%d, pos=%d)", spw, neg_count, pos_count)
-
-    model = XGBClassifier(**params)
+    final_params = {**ML_CONFIG.xgboost, **(params or {})}
+    model = XGBClassifier(**final_params)
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
@@ -93,17 +86,17 @@ def _train_xgboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFram
     }
 
 
-def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
+def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series, params: Optional[dict] = None) -> dict:
     """Train sklearn HistGradientBoosting classifier and return metrics.
 
-    Replaces LightGBM — avoids the native DLL dependency issue on Windows
-    while providing the same histogram-based gradient boosting algorithm.
-    Built-in early stopping and class weight support improve performance
-    on imbalanced datasets.
+    Class imbalance is handled by SMOTE upstream, so class_weight is NOT set
+    here (double-balancing would over-correct). Built-in early stopping
+    guards against overfitting on the validation set.
     """
     from sklearn.ensemble import HistGradientBoostingClassifier
 
-    model = HistGradientBoostingClassifier(**ML_CONFIG.histgbrt)
+    final_params = {**ML_CONFIG.histgbrt, **(params or {})}
+    model = HistGradientBoostingClassifier(**final_params)
     model.fit(X_train, y_train, X_val=X_val, y_val=y_val)
     y_pred = model.predict(X_val)
     y_proba = model.predict_proba(X_val)[:, 1]
@@ -114,16 +107,17 @@ def _train_histgbrt(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFra
     }
 
 
-def _train_catboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict:
+def _train_catboost(X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series, params: Optional[dict] = None) -> dict:
     """Train CatBoost classifier and return metrics.
 
-    Targets are binary (0=LOSS, 1=WIN). BREAKEVEN signals are mapped to 0 (LOSS)
-    in the dataset builder, preventing the binary/multiclass conflict that occurred
-    when BREAKEVEN targets were 0.5.
+    Targets are binary (0=LOSS, 1=WIN). Class imbalance is handled by SMOTE
+    upstream, so auto_class_weights is NOT set here (double-balancing would
+    over-correct toward WIN and inflate probabilities).
     """
     from catboost import CatBoostClassifier
 
-    model = CatBoostClassifier(**ML_CONFIG.catboost)
+    final_params = {**ML_CONFIG.catboost, **(params or {})}
+    model = CatBoostClassifier(**final_params)
     model.fit(
         X_train, y_train,
         eval_set=(X_val, y_val),
@@ -258,6 +252,7 @@ def train_models(
         X_vl, y_vl = X_val, y_val
 
         # Step 1: Optuna hyperparameter tuning
+        tuned_params = None
         if ML_CONFIG.use_tuning:
             try:
                 from ml.tuner import load_tuned_params, save_tuned_params, tune_hyperparams
@@ -275,7 +270,7 @@ def train_models(
                 logger.warning("Hyperparameter tuning failed for %s: %s", model_type, e)
 
         try:
-            result = trainer(X_tr, y_tr, X_vl, y_vl)
+            result = trainer(X_tr, y_tr, X_vl, y_vl, params=tuned_params)
         except Exception as e:
             logger.error("Failed to train %s: %s", model_type, e)
             continue
@@ -287,7 +282,7 @@ def train_models(
         selected_cols = list(X_tr.columns)
         if ML_CONFIG.use_feature_selection:
             sel_model, sel_metrics, sel_cols = _select_features(
-                model, model_type, X_tr, y_tr, X_vl, y_vl, trainer,
+                model, model_type, X_tr, y_tr, X_vl, y_vl, trainer, params=tuned_params,
             )
             # Only use selected-feature results if they succeeded
             if sel_cols is not None:
@@ -390,6 +385,7 @@ def _select_features(
     X_val: pd.DataFrame,
     y_val: pd.Series,
     trainer_fn,
+    params: Optional[dict] = None,
 ) -> tuple:
     """Drop features with <1% importance and retrain if beneficial.
 
@@ -436,7 +432,7 @@ def _select_features(
         # Retrain with selected features only
         X_train_sel = X_train[selected]
         X_val_sel = X_val[selected]
-        result = trainer_fn(X_train_sel, y_train, X_val_sel, y_val)
+        result = trainer_fn(X_train_sel, y_train, X_val_sel, y_val, params=params)
 
         # Only use selected-feature model if AUC didn't drop significantly
         new_auc = result["metrics"].roc_auc
@@ -444,7 +440,10 @@ def _select_features(
         try:
             old_auc = round(roc_auc_score(y_val, y_proba_old), 4)
         except Exception:
-            old_auc = 0.0
+            # If old AUC can't be computed (e.g. single class in y_val),
+            # don't accept the new model blindly — keep the original.
+            logger.warning("Could not compute old AUC for %s, keeping all features", model_type)
+            return model, None, list(X_train.columns)
 
         if old_auc > 0 and new_auc < old_auc - 0.01:
             logger.info(

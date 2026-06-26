@@ -6,40 +6,8 @@ from typing import Final
 
 
 class Symbol(str, Enum):
-    # Crypto
-    BTCUSD = "BTCUSD"
-    ETHUSD = "ETHUSD"
-    SOLUSD = "SOLUSD"
-    LTCUSD = "LTCUSD"
-    BCHUSD = "BCHUSD"
-    XRPUSD = "XRPUSD"
-    BTCEUR = "BTCEUR"
-    ETHGBP = "ETHGBP"
-
     # Metals
     XAUUSD = "XAUUSD"
-    XAGUSD = "XAGUSD"
-
-    # Indices
-    US30 = "US30"
-    US500 = "US500"
-    NAS100 = "NAS100"
-
-    # Forex Majors
-    EURUSD = "EURUSD"
-    GBPUSD = "GBPUSD"
-    USDJPY = "USDJPY"
-    USDCHF = "USDCHF"
-
-    # Forex Minors
-    EURGBP = "EURGBP"
-    EURJPY = "EURJPY"
-    GBPJPY = "GBPJPY"
-    AUDUSD = "AUDUSD"
-    NZDUSD = "NZDUSD"
-    USDCAD = "USDCAD"
-    EURAUD = "EURAUD"
-    GBPCHF = "GBPCHF"
 
 
 class Timeframe(str, Enum):
@@ -76,11 +44,6 @@ class TradeMode(str, Enum):
     SWING = "swing"
 
 
-class TradingPlatform(str, Enum):
-    CAPITAL = "CAPITAL"
-    MT5 = "MT5"
-
-
 @dataclass(frozen=True)
 class FastMarketConfig:
     """Configuration for fast market handling.
@@ -102,20 +65,6 @@ class FastMarketConfig:
     # 0.5 = halve SL/TP distances when ATR ratio >= threshold
     # Applied before the max distance cap.
     sl_tp_factor: float = 0.5
-
-
-@dataclass(frozen=True)
-class CapitalComConfig:
-    api_key: str = ""
-    identifier: str = ""
-    password: str = ""
-    use_demo: bool = True
-    base_url: str = "https://api-capital.backend-capital.com"
-    demo_url: str = "https://demo-api-capital.backend-capital.com"
-
-    @property
-    def active_url(self) -> str:
-        return self.demo_url if self.use_demo else self.base_url
 
 
 @dataclass(frozen=True)
@@ -201,7 +150,7 @@ class SwingConfig:
 class MLConfig:
     xgboost: dict = field(default_factory=lambda: {
         "n_estimators": 500,
-        "max_depth": 6,
+        "max_depth": 4,
         "learning_rate": 0.05,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
@@ -209,51 +158,51 @@ class MLConfig:
         "reg_lambda": 1.0,
         "min_child_weight": 5,
         "eval_metric": "logloss",
+        "early_stopping_rounds": 50,
     })
     histgbrt: dict = field(default_factory=lambda: {
         "max_iter": 500,
-        "max_depth": 6,
+        "max_depth": 4,
         "learning_rate": 0.05,
         "min_samples_leaf": 20,
         "l2_regularization": 1.0,
         "max_bins": 255,
         "early_stopping": True,
         "n_iter_no_change": 50,
-        "class_weight": "balanced",
         "scoring": "roc_auc",
         "verbose": 0,
     })
     catboost: dict = field(default_factory=lambda: {
         "iterations": 500,
-        "depth": 6,
+        "depth": 4,
         "learning_rate": 0.05,
         "l2_leaf_reg": 3.0,
         "subsample": 0.8,
         "bootstrap_type": "Bernoulli",
         "eval_metric": "Logloss",
         "verbose": 0,
-        # Auto class weights to handle imbalance (70% losses, 30% wins)
-        "auto_class_weights": "Balanced",
     })
     model_dir: str = ""  # Set dynamically in load_settings() to absolute path
     # ML prediction thresholds per symbol (read from .env)
     # Default threshold and per-symbol overrides
-    prediction_thresholds: dict = field(default_factory=lambda: {"DEFAULT": 0.3})
+    prediction_thresholds: dict = field(default_factory=lambda: {"DEFAULT": 0.5})
     # Hard block threshold: trades with ML probability below this are always blocked.
     # This catches trades where the model strongly disagrees (e.g., prob=0.15).
-    hard_block_threshold: float = 0.2
+    hard_block_threshold: float = 0.35
     # Minimum verified signals before ML predictions are used for filtering
     # Below this count, ML predictions are logged but don't block trades
-    min_verified_for_filter: int = 50
+    min_verified_for_filter: int = 200
     # Auto-train models during live trading (recommended: false - train via backtest instead)
     auto_train: bool = False
     # Drift detection settings
     drift_detection_enabled: bool = True
-    min_signals_for_drift: int = 20
+    min_signals_for_drift: int = 50
     drift_threshold: float = 0.15
     # SMOTE oversampling: generate synthetic minority class samples to
     # balance the dataset (typically ~70% LOSS / ~30% WIN).
     # Applied only to training data, never validation.
+    # When use_smote=True, model-level class weights are DISABLED to avoid
+    # double-balancing (SMOTE + scale_pos_weight over-corrects toward WIN).
     use_smote: bool = True
     # Hyperparameter optimization with Optuna (Bayesian search).
     # Finds better params than hardcoded defaults. ~50 trials per model.
@@ -271,7 +220,7 @@ class MLConfig:
 class WalkForwardConfig:
     train_months: int = 6
     test_months: int = 1
-    min_signals: int = 20
+    min_signals: int = 200
 
 
 @dataclass(frozen=True)
@@ -320,9 +269,7 @@ class WeeklyCloseConfig:
 
 @dataclass(frozen=True)
 class Settings:
-    capital_com: CapitalComConfig = field(default_factory=CapitalComConfig)
     mt5: MT5Config = field(default_factory=MT5Config)
-    trading_platform: TradingPlatform = TradingPlatform.CAPITAL
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     signal_weights: SignalWeights = field(default_factory=SignalWeights)
     signal_thresholds: SignalThresholds = field(default_factory=SignalThresholds)
@@ -336,11 +283,7 @@ class Settings:
     fast_market: FastMarketConfig = field(default_factory=FastMarketConfig)
     # Max positions per correlation group (prevents overexposure)
     max_positions_per_group: dict = field(default_factory=lambda: {
-        "CRYPTO": 1,
         "METALS": 1,
-        "FOREX_MAJOR": 2,
-        "FOREX_MINOR": 2,
-        "INDICES": 1,
     })
     trade_mode: TradeMode = TradeMode.SWING
     auto_trade: bool = False
@@ -444,7 +387,7 @@ class Settings:
         # Cap at reasonable maximum (swing should still be reasonable)
         return min(dynamic_candles, 200)
 
-    symbols: tuple[Symbol, ...] = (Symbol.BTCUSD,)
+    symbols: tuple[Symbol, ...] = (Symbol.XAUUSD,)
     timeframes: tuple[Timeframe, ...] = (Timeframe.M5, Timeframe.H1, Timeframe.H4)
     position_monitor_interval: int = 30  # Seconds between position monitor checks
     log_level: str = "INFO"
@@ -472,16 +415,6 @@ def load_settings() -> Settings:
         password=os.getenv("DB_PASSWORD", ""),
     )
 
-    # Capital.com
-    cap_cfg = CapitalComConfig(
-        api_key=os.getenv("CAPITAL_API_KEY", ""),
-        identifier=os.getenv("CAPITAL_IDENTIFIER", ""),
-        password=os.getenv("CAPITAL_PASSWORD", ""),
-        use_demo=os.getenv("CAPITAL_USE_DEMO", "true").lower() == "true",
-        base_url=os.getenv("CAPITAL_BASE_URL", CapitalComConfig.base_url),
-        demo_url=os.getenv("CAPITAL_DEMO_URL", CapitalComConfig.demo_url),
-    )
-
     # MT5
     mt5_cfg = MT5Config(
         login=int(os.getenv("MT5_LOGIN", "0")),
@@ -489,22 +422,17 @@ def load_settings() -> Settings:
         server=os.getenv("MT5_SERVER", ""),
     )
 
-    # Trading platform
-    platform_str = os.getenv("TRADING_PLATFORM", "CAPITAL").upper()
-    platform_map = {"CAPITAL": TradingPlatform.CAPITAL, "MT5": TradingPlatform.MT5}
-    trading_platform = platform_map.get(platform_str, TradingPlatform.CAPITAL)
-
     # Trade mode
     mode_str = os.getenv("TRADE_MODE", "swing").lower()
     mode_map = {"scalping": TradeMode.SCALPING, "day_trading": TradeMode.DAY_TRADING, "swing": TradeMode.SWING}
     trade_mode = mode_map.get(mode_str, TradeMode.SWING)
 
     # Symbols
-    symbols_str = os.getenv("SYMBOLS", "BTCUSD").upper()
+    symbols_str = os.getenv("SYMBOLS", "XAUUSD").upper()
     symbol_map = {s.value: s for s in Symbol}
     symbols = tuple(symbol_map[s.strip()] for s in symbols_str.split(",") if s.strip() in symbol_map)
     if not symbols:
-        symbols = (Symbol.BTCUSD,)
+        symbols = (Symbol.XAUUSD,)
 
     auto_trade = os.getenv("AUTO_TRADE", "false").lower() == "true"
 
@@ -586,15 +514,11 @@ def load_settings() -> Settings:
 
     # Correlation limit settings
     max_positions_per_group = {
-        "CRYPTO": int(os.getenv("MAX_POSITIONS_CRYPTO", "1")),
         "METALS": int(os.getenv("MAX_POSITIONS_METALS", "1")),
-        "FOREX_MAJOR": int(os.getenv("MAX_POSITIONS_FOREX_MAJOR", "2")),
-        "FOREX_MINOR": int(os.getenv("MAX_POSITIONS_FOREX_MINOR", "2")),
-        "INDICES": int(os.getenv("MAX_POSITIONS_INDICES", "1")),
     }
 
     # Read all ML_PREDICTION_THRESHOLD_<SYMBOL> from env
-    prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.3"))}
+    prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.5"))}
     for key, value in os.environ.items():
         if key.startswith("ML_PREDICTION_THRESHOLD_") and key != "ML_PREDICTION_THRESHOLD_DEFAULT":
             symbol_name = key.replace("ML_PREDICTION_THRESHOLD_", "")
@@ -604,14 +528,12 @@ def load_settings() -> Settings:
                 pass
 
     return Settings(
-        capital_com=cap_cfg,
         mt5=mt5_cfg,
-        trading_platform=trading_platform,
         database=db_cfg,
         ml=MLConfig(
             model_dir=model_dir,
             prediction_thresholds=prediction_thresholds,
-            hard_block_threshold=float(os.getenv("ML_HARD_BLOCK_THRESHOLD", "0.2")),
+            hard_block_threshold=float(os.getenv("ML_HARD_BLOCK_THRESHOLD", "0.35")),
             auto_train=auto_train,
             drift_detection_enabled=drift_detection_enabled,
             min_signals_for_drift=min_signals_for_drift,

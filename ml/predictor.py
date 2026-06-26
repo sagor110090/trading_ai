@@ -28,7 +28,7 @@ MODEL_DIR = ML_CONFIG.model_dir
 
 # Minimum AUC for a model to be included in the ensemble.
 # Models below this threshold are skipped — they add noise, not signal.
-MIN_ENSEMBLE_AUC = 0.55
+MIN_ENSEMBLE_AUC = 0.62
 
 # Model types that require an external library.  Checked once at startup
 # so that models whose library is missing are never even attempted.

@@ -22,17 +22,11 @@ python -m trading_ai.main --loop --interval 300
 
 ### Backfill & Retrain
 ```bash
-# Historical backfill (replay candles, generate/verify signals, train models)
-python -m trading_ai.backtest_historical --weeks 4 --step 1
-python -m trading_ai.backtest_historical --symbol ETHUSD --weeks 4 --reset
-
-# Auto backtest (auto-detects stale symbols)
-python auto_backtest.py --symbol XAUUSD --days 30 --reset
-
-# Standalone ML retraining
-python retrain_ml.py                            # all symbols, all model types
-python retrain_ml.py --symbols BTCUSD XAUUSD    # specific symbols
-python retrain_ml.py --models xgboost catboost   # specific model types
+# Backtest & ML training (single entry point)
+python backtest_historical.py                           # Auto-detect stale symbols, incrementally update & train
+python backtest_historical.py --weeks 4 --step 1        # Full backfill for 4 weeks, then train
+python backtest_historical.py --symbol XAUUSD --days 30 --reset   # Fresh 30-day backfill
+python backtest_historical.py --train --symbol XAUUSD   # Train ML only from existing signals
 ```
 
 ### Test
@@ -56,6 +50,7 @@ Fetch Candles (M5/H1/H4) → Store in DB
   → ML Predict (blocks trades below threshold)
   → Position Manager (cooldowns, correlation limits)
   → Execute Trade (Capital.com or MT5)
+  → Execute Trade (MetaTrader 5)
   → Track Drift
 ```
 
@@ -76,7 +71,7 @@ Models saved as `.joblib` + `_features.json` sidecars in `trading_ai/ml/models/`
 | `ml/predictor.py` | `predict_signal()` | Loads model by highest AUC, builds feature vector, returns probability |
 | `ml/trainer.py` | `train_models()` | Trains all model types, saves `.joblib` + `_features.json`, stores metadata in DB |
 | `trade/position_manager.py` | `evaluate_trade()` | Checks cooldowns, correlation groups (`trade/correlation.py`), dedup → "place"/"skip"/"reverse" |
-| `trade/executor.py` | `place_trade_unified()` | Dispatches to Capital.com or MT5 API |
+| `trade/executor.py` | `place_trade_unified()` | Places orders on MetaTrader 5 |
 | `ml/drift_detection.py` | `DriftDetector` | Tracks predictions vs outcomes per best-AUC model |
 
 ### Trade Modes
@@ -99,7 +94,7 @@ SQLAlchemy 2.0+ ORM. SQLite by default (`USE_SQLITE=true`), MySQL via PyMySQL as
 
 ## Dual Package Structure
 
-The project runs as both a flat script collection (root `.py` files like `retrain_ml.py`, `auto_backtest.py`) and a sub-package (`python -m trading_ai.main`). The `run.sh` sets `PYTHONPATH` to the parent directory to make both work. When adding new entry points as scripts, place them at root; when adding library modules, place them under the appropriate sub-package directory.
+The project runs as both a flat script collection (root `.py` files like `backtest_historical.py`) and a sub-package (`python -m trading_ai.main`). The `run.sh` sets `PYTHONPATH` to the parent directory to make both work. When adding new entry points as scripts, place them at root; when adding library modules, place them under the appropriate sub-package directory.
 
 ## Git Workflow
 

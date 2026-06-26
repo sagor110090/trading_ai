@@ -12,14 +12,16 @@ import logging
 import sys
 import threading
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from data.mt5_client import MT5Client
 
 import pandas as pd
 from rich.logging import RichHandler
 
-from config.settings import SETTINGS, Symbol, Timeframe, TradingPlatform
+from config.settings import SETTINGS, Symbol, Timeframe
 from config.utils import normalize_symbol
-from data.collector import CapitalComClient
 from data.database import create_tables, get_session
 from data.models import Candle, Signal, SignalVerification
 from display import (
@@ -67,34 +69,23 @@ logger = logging.getLogger(__name__)
 
 
 def _create_client():
-    """Create the appropriate trading client based on platform selection."""
-    if SETTINGS.trading_platform == TradingPlatform.MT5:
-        from data.mt5_client import MT5Client
-        return MT5Client()
-    else:
-        return CapitalComClient()
+    """Create the MetaTrader 5 trading client."""
+    from data.mt5_client import MT5Client
+    return MT5Client()
 
 
 def _authenticate_client(client) -> bool:
     """Authenticate the trading client."""
     try:
-        if SETTINGS.trading_platform == TradingPlatform.MT5:
-            success = client.connect()
-            if success:
-                console.print("[green]✓ Connected to MetaTrader 5[/]")
-                # Display account info
-                account = client.get_account_info()
-                if account:
-                    console.print(f"[dim]  Balance: ${account['balance']:.2f} | Equity: ${account['equity']:.2f}[/]")
-            else:
-                console.print("[bold red]✗ Cannot connect to MetaTrader 5. Make sure MT5 terminal is running.[/]")
-            return success
-
-        success = client.authenticate()
+        success = client.connect()
         if success:
-            console.print("[green]✓ Authenticated with Capital.com[/]")
+            console.print("[green]✓ Connected to MetaTrader 5[/]")
+            # Display account info
+            account = client.get_account_info()
+            if account:
+                console.print(f"[dim]  Balance: ${account['balance']:.2f} | Equity: ${account['equity']:.2f}[/]")
         else:
-            console.print("[bold red]✗ Cannot authenticate with Capital.com. Check credentials.[/]")
+            console.print("[bold red]✗ Cannot connect to MetaTrader 5. Make sure MT5 terminal is running.[/]")
         return success
     except KeyboardInterrupt:
         console.print("\n[yellow]Authentication cancelled by user.[/]")
@@ -251,7 +242,7 @@ def _load_candles_from_db(symbol: str, timeframe: str, limit: int = 500) -> pd.D
 
 
 def _check_position_strength(
-    client: CapitalComClient,
+    client: "MT5Client",
     position_monitor: PositionMonitor,
     position_manager: PositionManager,
 ) -> None:
@@ -423,8 +414,83 @@ def _check_position_strength(
                 # external_close already displayed above with correct cooldown (30 min)
 
 
+def _get_verified_count(symbol: str) -> int:
+    """Count verified signals for a symbol (used for min_verified_for_filter gating)."""
+    with get_session() as session:
+        return (
+            session.query(SignalVerification)
+            .join(Signal, SignalVerification.signal_id == Signal.id)
+            .filter(Signal.symbol == symbol)
+            .count()
+        )
+
+
+def _apply_ml_filter(trade_signal: TradeSignal, stats: dict) -> tuple[bool, float]:
+    """Apply ML prediction gating to a trade decision.
+
+    Centralizes the ML filter logic used by both the duplicate-signal path and
+    the new-signal path. Enforces min_verified_for_filter — below that count,
+    predictions are logged but do NOT gate trades (the model is untrusted).
+
+    Returns:
+        (should_trade, size_multiplier) — should_trade is False if blocked,
+        size_multiplier scales the position size (1.0 when approved or when ML
+        is disabled/untrusted, <1.0 in the soft zone).
+    """
+    should_trade = True
+    size_multiplier = 1.0
+
+    prediction = predict_signal(trade_signal)
+    if not prediction:
+        stats["no_ml"] = True
+        display_no_ml_model()
+        return should_trade, size_multiplier
+
+    stats["ml_prediction"] = prediction
+    threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
+    hard_block = SETTINGS.ml.hard_block_threshold
+
+    # If the model was trained on too few verified signals, log the prediction
+    # but do NOT gate the trade — the model is not trustworthy yet.
+    verified_count = _get_verified_count(trade_signal.symbol)
+    if verified_count < SETTINGS.ml.min_verified_for_filter:
+        logger.info(
+            "ML prediction for %s logged but not gating (verified=%d < min=%d)",
+            trade_signal.symbol, verified_count, SETTINGS.ml.min_verified_for_filter,
+        )
+        display_ml_prediction(prediction, threshold, zone="untrusted")
+        return should_trade, size_multiplier
+
+    if prediction.probability < hard_block:
+        should_trade = False
+        stats["ml_blocked"] = True
+        stats["ml_block_reason"] = "hard_block"
+        display_ml_prediction(prediction, threshold, zone="hard_block")
+    elif prediction.probability < threshold:
+        size_multiplier = prediction.probability / threshold
+        stats["ml_confidence_multiplier"] = round(size_multiplier, 2)
+        stats["ml_soft_block"] = True
+        display_ml_prediction(prediction, threshold, zone="soft")
+    else:
+        stats["ml_approved"] = True
+        display_ml_prediction(prediction, threshold, zone="approved")
+
+    try:
+        track_ml_prediction(
+            signal_id=trade_signal.signal_id,
+            symbol=trade_signal.symbol,
+            model_type=prediction.model_type,
+            model_version=prediction.model_version,
+            ml_probability=prediction.probability,
+        )
+    except Exception as e:
+        logger.warning("Failed to track ML prediction: %s", e)
+
+    return should_trade, size_multiplier
+
+
 def run_signal_cycle(
-    client: CapitalComClient,
+    client: "MT5Client",
     position_manager: PositionManager,
     position_monitor: Optional[PositionMonitor] = None,
 ) -> None:
@@ -628,10 +694,7 @@ def run_signal_cycle(
         try:
             price_data = client.get_latest_price(symbol)
             if price_data:
-                if SETTINGS.trading_platform == TradingPlatform.MT5:
-                    live_price = price_data["ask"] if price_data.get("ask") else price_data.get("bid")
-                else:
-                    live_price = price_data.get("bid") or price_data.get("ask")
+                live_price = price_data["ask"] if price_data.get("ask") else price_data.get("bid")
                 logger.info("Live %s price: %.2f", symbol.value, live_price)
         except Exception as e:
             logger.warning("Could not fetch live price for %s: %s", symbol.value, e)
@@ -654,45 +717,7 @@ def run_signal_cycle(
                     display_signal(trade_signal)
 
                     # ── ML prediction (even for duplicates) ─────────────
-                    should_trade = True
-                    prediction = predict_signal(trade_signal)
-                    if prediction:
-                        stats["ml_prediction"] = prediction
-                        threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
-                        hard_block = SETTINGS.ml.hard_block_threshold
-
-                        if prediction.probability < hard_block:
-                            # Hard block: ML strongly disagrees
-                            should_trade = False
-                            stats["ml_blocked"] = True
-                            stats["ml_block_reason"] = "hard_block"
-                            display_ml_prediction(prediction, threshold, zone="hard_block")
-                        elif prediction.probability < threshold:
-                            # Soft zone: ML is uncertain, trade proceeds with
-                            # reduced confidence multiplier for position sizing
-                            confidence_multiplier = prediction.probability / threshold
-                            stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
-                            stats["ml_soft_block"] = True
-                            display_ml_prediction(prediction, threshold, zone="soft")
-                        else:
-                            # Approved: ML agrees with the signal
-                            stats["ml_approved"] = True
-                            display_ml_prediction(prediction, threshold, zone="approved")
-
-                        # Track prediction for drift detection
-                        try:
-                            track_ml_prediction(
-                                signal_id=trade_signal.signal_id,
-                                symbol=trade_signal.symbol,
-                                model_type=prediction.model_type,
-                                model_version=prediction.model_version,
-                                ml_probability=prediction.probability,
-                            )
-                        except Exception as e:
-                            logger.warning("Failed to track ML prediction: %s", e)
-                    else:
-                        stats["no_ml"] = True
-                        display_no_ml_model()
+                    should_trade, size_multiplier = _apply_ml_filter(trade_signal, stats)
 
                     # Even for duplicates, check if we should reverse
                     if SETTINGS.auto_trade and should_trade:
@@ -702,6 +727,7 @@ def run_signal_cycle(
                             position_manager,
                             stats,
                             position_monitor=position_monitor,
+                            size_multiplier=size_multiplier,
                         )
                         # Only save the signal if a new trade was actually placed
                         if trade_placed:
@@ -725,45 +751,7 @@ def run_signal_cycle(
                 stats["signal"] = trade_signal
 
                 # ── ML prediction ──────────────────────────────────────
-                should_trade = True
-                prediction = predict_signal(trade_signal)
-                if prediction:
-                    stats["ml_prediction"] = prediction
-                    threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
-                    hard_block = SETTINGS.ml.hard_block_threshold
-
-                    if prediction.probability < hard_block:
-                        # Hard block: ML strongly disagrees
-                        should_trade = False
-                        stats["ml_blocked"] = True
-                        stats["ml_block_reason"] = "hard_block"
-                        display_ml_prediction(prediction, threshold, zone="hard_block")
-                    elif prediction.probability < threshold:
-                        # Soft zone: ML is uncertain, trade proceeds with
-                        # reduced confidence multiplier for position sizing
-                        confidence_multiplier = prediction.probability / threshold
-                        stats["ml_confidence_multiplier"] = round(confidence_multiplier, 2)
-                        stats["ml_soft_block"] = True
-                        display_ml_prediction(prediction, threshold, zone="soft")
-                    else:
-                        # Approved: ML agrees with the signal
-                        stats["ml_approved"] = True
-                        display_ml_prediction(prediction, threshold, zone="approved")
-
-                    # Track prediction for drift detection
-                    try:
-                        track_ml_prediction(
-                            signal_id=trade_signal.signal_id,
-                            symbol=trade_signal.symbol,
-                            model_type=prediction.model_type,
-                            model_version=prediction.model_version,
-                            ml_probability=prediction.probability,
-                        )
-                    except Exception as e:
-                        logger.warning("Failed to track ML prediction: %s", e)
-                else:
-                    stats["no_ml"] = True
-                    display_no_ml_model()
+                should_trade, size_multiplier = _apply_ml_filter(trade_signal, stats)
 
                 # ── Auto-trade ──────────────────────────────────────────
                 if SETTINGS.auto_trade and should_trade:
@@ -773,6 +761,7 @@ def run_signal_cycle(
                         position_manager,
                         stats,
                         position_monitor=position_monitor,
+                        size_multiplier=size_multiplier,
                     )
                 elif SETTINGS.auto_trade and not should_trade:
                     display_trade_blocked("ML filter")
@@ -793,11 +782,12 @@ def run_signal_cycle(
 
 
 def _handle_trade_decision(
-    client: CapitalComClient,
+    client: "MT5Client",
     trade_signal: TradeSignal,
     position_manager: PositionManager,
     stats: dict,
     position_monitor: Optional[PositionMonitor] = None,
+    size_multiplier: float = 1.0,
 ) -> bool:
     """Evaluate and execute a trade based on position state.
 
@@ -885,7 +875,9 @@ def _handle_trade_decision(
 
     if decision.action in ("place", "reverse_and_place"):
         # Place the trade
-        size = SETTINGS.get_trade_size(trade_signal.symbol)
+        base_size = SETTINGS.get_trade_size(trade_signal.symbol)
+        # Apply ML soft-zone size multiplier (reduces risk when ML is uncertain)
+        size = max(0.01, round(base_size * size_multiplier, 4))
         result = place_trade_unified(client, trade_signal, size=size)
 
         if result.success:
@@ -1063,7 +1055,7 @@ _monitor_lock = threading.Lock()
 
 
 def _monitor_loop(
-    client: CapitalComClient,
+    client: "MT5Client",
     position_manager: PositionManager,
     position_monitor: PositionMonitor,
     interval: int = 60,
@@ -1100,7 +1092,7 @@ def _monitor_loop(
         time.sleep(interval)
 
 
-def run_loop(client: CapitalComClient, position_manager: PositionManager, position_monitor: PositionMonitor, interval: int = 300) -> None:
+def run_loop(client: "MT5Client", position_manager: PositionManager, position_monitor: PositionMonitor, interval: int = 300) -> None:
     """Run the signal cycle in a loop with the given interval in seconds.
 
     This keeps the PositionManager alive between cycles so cooldowns
@@ -1151,7 +1143,7 @@ def main() -> None:
     parser.add_argument("--interval", type=int, default=300, help="Loop interval in seconds (default: 300)")
     args = parser.parse_args()
 
-    platform_name = "MetaTrader 5" if SETTINGS.trading_platform == TradingPlatform.MT5 else "Capital.com"
+    platform_name = "MetaTrader 5"
     console.print(f"[bold cyan]Trading AI[/] starting...")
     console.print(f"[dim]Platform: {platform_name}[/]")
     create_tables()

@@ -31,19 +31,13 @@ ASSET_CLASS_UNKNOWN = "unknown"
 
 
 # Symbol lists for each asset class (uppercase)
-CRYPTO_SYMBOLS = {
-    "BTCUSD", "ETHUSD", "LTCUSD", "BCHUSD", "XRPUSD", "SOLUSD",
-    "BTCEUR", "ETHGBP"
-}
+CRYPTO_SYMBOLS = set()
 
-FOREX_SYMBOLS = {
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "EURGBP", "EURJPY", "GBPJPY",
-    "AUDUSD", "NZDUSD", "USDCAD", "EURAUD", "GBPCHF"
-}
+FOREX_SYMBOLS = set()
 
-METALS_SYMBOLS = {"XAUUSD", "XAGUSD"}
+METALS_SYMBOLS = {"XAUUSD"}
 
-INDICES_SYMBOLS = {"US30", "US500", "NAS100"}
+INDICES_SYMBOLS = set()
 
 
 @dataclass

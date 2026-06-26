@@ -6,6 +6,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import joblib
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -287,13 +288,10 @@ def _oversampled_split(
     train_minority = train_df[train_df[TARGET_COLUMN] == minority_class]
 
     if len(train_minority) == 0:
-        # No minority in train — duplicate from test set
-        test_minority = test_df[test_df[TARGET_COLUMN] == minority_class]
-        if len(test_minority) == 0:
-            logger.warning("No minority class samples at all — cannot train")
-            return []
-        # Copy minority from test into train (small data leak, but necessary)
-        train_minority = test_minority.copy()
+        # No minority in train — cannot form a valid split without leaking
+        # test data into train. Return empty so the caller skips this split.
+        logger.warning("No minority class in train split — skipping (would require data leak)")
+        return []
 
     # Upsample minority to match majority count
     train_minority_upsampled = resample(
@@ -308,12 +306,10 @@ def _oversampled_split(
 
     # Verify test has both classes
     if len(test_df[TARGET_COLUMN].unique()) < 2:
-        # Move some samples from train to test to balance
-        minority_in_test = test_df[test_df[TARGET_COLUMN] == minority_class]
-        if len(minority_in_test) == 0:
-            # Take a few minority samples from train_balanced for test
-            extra = train_minority.head(2)
-            test_df = pd.concat([test_df, extra]).sort_values("timestamp").reset_index(drop=True)
+        # Test set has a single class — AUC is undefined. Rather than leak
+        # train rows into test, skip this split.
+        logger.warning("Test split has single class — skipping (would require data leak)")
+        return []
 
     train_win = (train_balanced[TARGET_COLUMN] == 1).sum()
     test_win = (test_df[TARGET_COLUMN] == 1).sum()
@@ -381,14 +377,37 @@ def run_walk_forward(
             if X_train.empty or X_test.empty:
                 continue
 
-            # Train single model type on this fold
+            # Split the test period into validation (first half) and test (second half).
+            # The validation half is used for early stopping, tuning, and calibration;
+            # the test half gives honest out-of-sample metrics never touched during
+            # training. This prevents the test set from being used as validation
+            # (which would make the reported metrics optimistically biased).
+            n_test = len(X_test)
+            val_count = n_test // 2
+            if val_count < 5:
+                # Too few test samples to split — skip this fold rather than leak
+                logger.warning("Fold %d: test set too small to split (%d), skipping",
+                                fold_info["fold"], n_test)
+                continue
+            X_val = X_test.iloc[:val_count]
+            y_val = y_test.iloc[:val_count]
+            X_test_honest = X_test.iloc[val_count:]
+            y_test_honest = y_test.iloc[val_count:]
+
+            # Skip fold if the honest test set has a single class (AUC undefined)
+            if len(np.unique(y_test_honest)) < 2:
+                logger.warning("Fold %d: honest test set has single class, skipping",
+                                fold_info["fold"])
+                continue
+
+            # Train single model type on this fold (validation = first half of test)
             results = train_models(
                 symbol=symbol,
                 timeframe=timeframe,
                 X_train=X_train,
                 y_train=y_train,
-                X_val=X_test,
-                y_val=y_test,
+                X_val=X_val,
+                y_val=y_val,
                 model_types=[model_type],
                 train_signal_count=total_signals,
             )
@@ -396,9 +415,19 @@ def run_walk_forward(
             if not results:
                 continue
 
-            # The validation metrics from the trainer ARE the walk-forward metrics
-            # since X_val/y_val = the out-of-sample test set
-            metrics = results[0].metrics
+            # Recompute metrics on the HONEST test set (second half, never used
+            # for early stopping / calibration / feature selection) so the
+            # reported walk-forward metrics are truly out-of-sample.
+            try:
+                from ml.trainer import _compute_metrics
+                model_obj = joblib.load(results[0].filepath)
+                y_pred_h = model_obj.predict(X_test_honest)
+                y_proba_h = model_obj.predict_proba(X_test_honest)[:, 1]
+                metrics = _compute_metrics(y_test_honest, y_pred_h, y_proba_h)
+            except Exception as e:
+                logger.warning("Honest metrics recompute failed for fold %d: %s",
+                                fold_info["fold"], e)
+                metrics = results[0].metrics
 
             fold_result = FoldResult(
                 fold=fold_info["fold"],
@@ -422,8 +451,11 @@ def run_walk_forward(
         f1s = [f.metrics.f1 for f in fold_results]
         aucs = [f.metrics.roc_auc for f in fold_results]
 
-        # Win rate = mean accuracy across folds (fraction of correct predictions)
-        win_rate = np.mean(accs)
+        # Win rate = mean recall across folds (fraction of WIN signals the model
+        # correctly identified). Accuracy on imbalanced data is misleading (70%
+        # losses → always-predict-LOSS gives 70% accuracy), so we report the
+        # model's ability to find winning trades.
+        win_rate = np.mean(recs) if recs else 0.0
 
         report = WalkForwardReport(
             symbol=symbol,

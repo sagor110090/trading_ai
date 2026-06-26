@@ -249,16 +249,8 @@ class PositionMonitor:
                 direction=pos.direction,
             )
 
-        # Get current price based on platform
-        # Handle both enum and string values for trading_platform
-        is_mt5 = (
-            SETTINGS.trading_platform == "MT5" or
-            (hasattr(SETTINGS.trading_platform, "value") and SETTINGS.trading_platform.value == "MT5")
-        )
-        if is_mt5:
-            current_price = price_data.get("ask") or price_data.get("bid")
-        else:
-            current_price = price_data.get("bid") or price_data.get("ask")
+        # Get current price (MetaTrader 5: prefer ask, then bid)
+        current_price = price_data.get("ask") or price_data.get("bid")
 
         if not current_price:
             return MonitorDecision(
@@ -648,4 +640,3 @@ class PositionMonitor:
                 logger.debug("Logged trade to database: %s", symbol_to_store)
             except Exception as e:
                 logger.error("Failed to log trade: %s", e)
-

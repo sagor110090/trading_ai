@@ -134,16 +134,18 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
 
-    # Encode target: WIN=1, LOSS=0, BREAKEVEN=0
-    # BREAKEVEN signals are treated as LOSS (0) for binary classification.
-    # A breakeven trade didn't profit, so it shouldn't teach the model that
-    # the pattern leads to a win. All models now use binary (0/1) targets.
+    # Encode target: WIN=1, LOSS=0. BREAKEVEN rows are DROPPED — a breakeven
+    # trade is a neutral outcome, not a losing pattern. Labeling it as LOSS
+    # adds label noise that depresses probabilities for similar signals.
     target_map = {
         SignalResult.WIN.value: 1.0,
         SignalResult.LOSS.value: 0.0,
-        SignalResult.BREAKEVEN.value: 0.0,
     }
-    df[TARGET_COLUMN] = df["result"].map(target_map).fillna(0.0)
+    df[TARGET_COLUMN] = df["result"].map(target_map)
+    be_count = int(df[TARGET_COLUMN].isna().sum())
+    if be_count > 0:
+        logger.info("Dropping %d BREAKEVEN/unmapped rows (not WIN or LOSS)", be_count)
+    df = df.dropna(subset=[TARGET_COLUMN]).copy()
 
     # Encode session with one-hot encoding
     for cat in SESSION_CATEGORIES:
@@ -221,19 +223,23 @@ def split_features_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
 def _add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add lag features (1, 2, 3 candles back) for key indicators.
 
-    Lags are computed within each (symbol) group to prevent cross-contamination.
+    Lags are computed within each (symbol, timeframe) group to prevent
+    cross-contamination. When timeframe=None (the "all" model), signals from
+    M5/H1/H4 interleave per symbol — grouping only by symbol would pull lags
+    from a different timeframe, corrupting the temporal features.
     Rows where lag values are NaN (first few rows per group) are dropped.
 
     Must be called AFTER sorting by timestamp and AFTER filling NaN values.
     """
-    if df.empty or "symbol" not in df.columns:
+    if df.empty or "symbol" not in df.columns or "timeframe" not in df.columns:
         return df
 
-    # Ensure sorted by timestamp within each symbol
-    df = df.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+    # Ensure sorted by timestamp within each (symbol, timeframe)
+    df = df.sort_values(["symbol", "timeframe", "timestamp"]).reset_index(drop=True)
 
-    # Compute lag features per symbol group
-    for symbol, group_idx in df.groupby("symbol").groups.items():
+    # Compute lag features per (symbol, timeframe) group
+    group_cols = ["symbol", "timeframe"]
+    for (sym, tf), group_idx in df.groupby(group_cols).groups.items():
         for col in LAG_COLUMNS:
             if col not in df.columns:
                 continue

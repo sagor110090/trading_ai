@@ -1,10 +1,10 @@
 backtest cmd:-
-python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol US30
+python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAUUSD
 
-train modal cmd:- 
- python retrain_ml.py --symbols AUDUSD
+train modal cmd:- (train ML only from existing signals)
+ python backtest_historical.py --train --symbol XAUUSD
 
  auto back with days:
-   python auto_backtest.py --symbols XAGUSD BTCUSD
+   python backtest_historical.py --days 30 --symbol XAUUSD
 
-   python auto_backtest.py  
+   python backtest_historical.py --force

@@ -56,24 +56,26 @@ WEEKLY_CLOSE_CLOSE_POSITIONS_HOURS=0.5      # Hours before close to close positi
 
 ---
 
-## Auto Backtest
+## Backtest & ML Training
 
-Automated backtesting and ML training pipeline.
+The single entry point for backtesting and ML training is `backtest_historical.py`.
+It auto-detects stale symbols, fetches new data, replays signals, verifies them,
+and trains ML models via walk-forward cross-validation.
 
 ### Basic Usage
 
 ```bash
-# Auto-detect and update all stale symbols
-python auto_backtest.py
+# Auto-detect and update all stale symbols (default)
+python backtest_historical.py
 
-# Backtest specific symbol for 30 days
-python auto_backtest.py --symbol XAUUSD --days 30
+# Full backfill for 30 days, then train
+python backtest_historical.py --symbol XAUUSD --days 30
 
 # Delete existing data, then backtest fresh
-python auto_backtest.py --symbol XAUUSD --days 60 --reset
+python backtest_historical.py --symbol XAUUSD --days 60 --reset
 
-# Specify trade mode
-python auto_backtest.py --symbol XAUUSD --days 30 --mode day_trading
+# Train ML only from existing verified signals (no backfill)
+python backtest_historical.py --train --symbol XAUUSD
 ```
 
 ### Parameters
@@ -82,7 +84,10 @@ python auto_backtest.py --symbol XAUUSD --days 30 --mode day_trading
 |-----------|-------------|---------|
 | `--symbol` | Single symbol to backtest | `--symbol XAUUSD` |
 | `--symbols` | Multiple symbols | `--symbols XAGUSD BTCUSD` |
-| `--days` | Days to backtest | `--days 30` |
+| `--days` | Days to backtest (alternative to --weeks) | `--days 30` |
+| `--weeks` | Weeks to backtest | `--weeks 4` |
+| `--step` | M5 candles per step (1=5min, 12=1hr) | `--step 12` |
+| `--train` | Train ML only, no backfill | `--train` |
 | `--reset` | Delete existing signals first | `--reset` |
 | `--force` | Process all symbols regardless | `--force` |
 | `--mode` | Trade mode | `--mode day_trading` |
@@ -97,13 +102,13 @@ python auto_backtest.py --symbol XAUUSD --days 30 --mode day_trading
 
 ```bash
 # Fresh 60-day backtest for XAUUSD (deletes old data first)
-python auto_backtest.py --symbol XAUUSD --days 60 --reset --mode day_trading
+python backtest_historical.py --symbol XAUUSD --days 60 --reset --mode day_trading
 
 # Update multiple specific symbols
-python auto_backtest.py --symbols XAGUSD BTCUSD --force
+python backtest_historical.py --symbols XAUUSD --force
 
 # Quick test with 7 days
-python auto_backtest.py --symbol AUDUSD --days 7
+python backtest_historical.py --symbol XAUUSD --days 7
 ```
 
 ---
@@ -216,19 +221,19 @@ python -m trading_ai.main
 **Fresh ML Training:**
 ```bash
 # Delete old signals, backtest 60 days, train new models
-python auto_backtest.py --symbol XAUUSD --days 60 --reset --mode day_trading
+python backtest_historical.py --symbol XAUUSD --days 60 --reset --mode day_trading
 ```
 
 **Update All Symbols:**
 ```bash
 # Auto-detect new data and update all symbols
-python auto_backtest.py --force
+python backtest_historical.py --force
 ```
 
 **Test New Settings:**
 ```bash
 # Quick 7-day test
-python auto_backtest.py --symbol XAUUSD --days 7 --mode scalping --reset
+python backtest_historical.py --symbol XAUUSD --days 7 --mode scalping --reset
 ```
 
 **Start Live Trading:**
@@ -241,8 +246,7 @@ python -m trading_ai.main --loop --interval 300
 
 | File | Purpose |
 |------|---------|
-| `auto_backtest.py` | Automated backtest + ML training |
-| `backtest_historical.py` | Manual backtest with full control |
+| `backtest_historical.py` | Backtest + ML training (single entry point) |
 | `main.py` | Live trading bot |
 | `trade/weekly_close.py` | Weekly close handling logic |
 

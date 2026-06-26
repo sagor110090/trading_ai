@@ -20,23 +20,8 @@ logger = logging.getLogger(__name__)
 
 # Correlation groups - symbols that tend to move together
 CORRELATION_GROUPS = {
-    "CRYPTO": [
-        "BTCUSD", "ETHUSD", "SOLUSD", "LTCUSD", "BCHUSD", "XRPUSD",
-        "BTCEUR", "ETHGBP",
-    ],
     "METALS": [
         "XAUUSD",  # Gold
-        "XAGUSD",  # Silver
-    ],
-    "FOREX_MAJOR": [
-        "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
-        "AUDUSD", "NZDUSD", "USDCAD",
-    ],
-    "FOREX_MINOR": [
-        "EURGBP", "EURJPY", "GBPJPY", "EURAUD", "GBPCHF",
-    ],
-    "INDICES": [
-        "US30", "US500", "NAS100",
     ],
 }
 
@@ -96,7 +81,7 @@ def check_correlation_limit(
 
     Args:
         symbol: Symbol to check
-        client: Trading client (Capital.com or MT5)
+        client: Trading client (MetaTrader 5)
 
     Returns:
         CorrelationCheck with decision

@@ -88,31 +88,13 @@ def _pips_to_price(pips: float, symbol: Symbol, entry: float) -> float:
     """Convert pips to price value based on the symbol.
 
     Different instruments have different pip values:
-    - Forex (non-JPY): 1 pip = 0.0001
-    - JPY pairs: 1 pip = 0.01
-    - Gold (XAUUSD), Silver (XAGUSD): 1 pip = 0.01
-    - Indices (US30, US500, NAS100): 1 pip = 0.1 or 1.0
-    - Crypto (BTCUSD, ETHUSD): varies by price
+    - Gold (XAUUSD): 1 pip = 0.01
     """
-    # JPY pairs
-    if symbol in [Symbol.USDJPY, Symbol.EURJPY, Symbol.GBPJPY]:
-        return pips * 0.01
-
     # Metals (Gold, Silver)
-    if symbol in [Symbol.XAUUSD, Symbol.XAGUSD]:
+    if symbol in [Symbol.XAUUSD]:
         return pips * 0.01
 
-    # Indices
-    if symbol in [Symbol.US30, Symbol.US500, Symbol.NAS100]:
-        return pips * 0.1
-
-    # Crypto - use percentage of current price
-    if symbol in [Symbol.BTCUSD, Symbol.ETHUSD, Symbol.LTCUSD,
-                  Symbol.BCHUSD, Symbol.XRPUSD, Symbol.BTCEUR, Symbol.ETHGBP]:
-        return pips * entry * 0.0001
-
-    # Default for forex majors (EURUSD, GBPUSD, etc.)
-    return pips * 0.0001
+    return pips * 0.01
 
 
 def _compute_stop_take(
