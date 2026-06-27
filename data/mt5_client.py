@@ -26,6 +26,7 @@ _TIMEFRAME_MAP: dict[Timeframe, str] = {
 # MT5 symbol names (may differ from Capital.com)
 _SYMBOL_MAP: dict[Symbol, str] = {
     Symbol.XAUUSD: "XAUUSD",
+    Symbol.BTCUSD: "BTCUSD",
 }
 
 

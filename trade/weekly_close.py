@@ -31,7 +31,8 @@ ASSET_CLASS_UNKNOWN = "unknown"
 
 
 # Symbol lists for each asset class (uppercase)
-CRYPTO_SYMBOLS = set()
+# Crypto symbols trade 24/7 (no weekend gap, no weekly close)
+CRYPTO_SYMBOLS = {"BTCUSD"}
 
 FOREX_SYMBOLS = set()
 

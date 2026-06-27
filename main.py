@@ -701,14 +701,14 @@ def run_signal_cycle(
 
         if not df_h4.empty and not df_h1.empty:
             trade_signal = generate_signal(
-                df_h4, df_h1, df_m5, symbol, SETTINGS.trade_mode, live_price=live_price,
+                df_h4, df_h1, df_m5, symbol, live_price=live_price,
                 prefix="live_",
             )
 
             if trade_signal:
                 # ── Signal dedup: skip storing if duplicate ──────────
                 if position_manager.is_duplicate_signal(
-                    trade_signal.symbol, trade_signal.signal.value, SETTINGS.trade_mode.value
+                    trade_signal.symbol, trade_signal.signal.value
                 ):
                     display_duplicate_signal(trade_signal.symbol, trade_signal.signal.value)
                     # Don't store, don't trade, but still show the signal was detected

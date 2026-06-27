@@ -90,19 +90,16 @@ python backtest_historical.py --train --symbol XAUUSD
 | `--train` | Train ML only, no backfill | `--train` |
 | `--reset` | Delete existing signals first | `--reset` |
 | `--force` | Process all symbols regardless | `--force` |
-| `--mode` | Trade mode | `--mode day_trading` |
 
-### Trade Modes
+### Trade Mode
 
-- `scalping` - Fast in/out (5 min entry, 1H trend)
-- `day_trading` - Close same day (5 min entry, 1H trend, 4H big picture)
-- `swing` - Hold hours/days (4H+H1 must agree)
+The application uses `day_trading` exclusively (close same day: 5 min entry, 1H trend, 4H big picture).
 
 ### Examples
 
 ```bash
 # Fresh 60-day backtest for XAUUSD (deletes old data first)
-python backtest_historical.py --symbol XAUUSD --days 60 --reset --mode day_trading
+python backtest_historical.py --symbol XAUUSD --days 60 --reset
 
 # Update multiple specific symbols
 python backtest_historical.py --symbols XAUUSD --force
@@ -120,7 +117,7 @@ Full control over backtesting parameters.
 ### Usage
 
 ```bash
-python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAUUSD
+python backtest_historical.py --weeks 8 --step 1 --symbol XAUUSD
 ```
 
 ### Parameters
@@ -129,7 +126,6 @@ python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAU
 |-----------|-------------|---------|
 | `--weeks` | Weeks of historical data | 4 |
 | `--step` | Step size in M5 candles (1=5min, 12=1hour) | 1 |
-| `--mode` | Trade mode | from .env |
 | `--symbol` | Symbol to backtest | all symbols |
 | `--reset` | Delete existing signals first | false |
 
@@ -145,13 +141,13 @@ python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAU
 
 ```bash
 # Thorough backtest (every 5 minutes)
-python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAUUSD
+python backtest_historical.py --weeks 8 --step 1 --symbol XAUUSD
 
 # Faster backtest (every hour)
-python backtest_historical.py --weeks 8 --step 12 --mode swing --symbol BTCUSD
+python backtest_historical.py --weeks 8 --step 12 --symbol BTCUSD
 
 # Reset and backtest fresh
-python backtest_historical.py --weeks 4 --step 1 --mode day_trading --symbol XAUUSD --reset
+python backtest_historical.py --weeks 4 --step 1 --symbol XAUUSD --reset
 ```
 
 ---
@@ -182,7 +178,7 @@ python -m trading_ai.main --loop --interval 300
 ```bash
 # Trading Settings
 TRADING_PLATFORM=MT5                    # CAPITAL or MT5
-TRADE_MODE=day_trading                 # scalping, day_trading, swing
+TRADE_MODE=day_trading                 # fixed to day_trading (ignored)
 AUTO_TRADE=true                        # true = place orders, false = signals only
 
 # Symbols
@@ -221,7 +217,7 @@ python -m trading_ai.main
 **Fresh ML Training:**
 ```bash
 # Delete old signals, backtest 60 days, train new models
-python backtest_historical.py --symbol XAUUSD --days 60 --reset --mode day_trading
+python backtest_historical.py --symbol XAUUSD --days 60 --reset
 ```
 
 **Update All Symbols:**
@@ -233,7 +229,7 @@ python backtest_historical.py --force
 **Test New Settings:**
 ```bash
 # Quick 7-day test
-python backtest_historical.py --symbol XAUUSD --days 7 --mode scalping --reset
+python backtest_historical.py --symbol XAUUSD --days 7 --reset
 ```
 
 **Start Live Trading:**

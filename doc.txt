@@ -1,5 +1,5 @@
 backtest cmd:-
-python backtest_historical.py --weeks 8 --step 1 --mode day_trading --symbol XAUUSD
+python backtest_historical.py --weeks 8 --step 1 --symbol XAUUSD
 
 train modal cmd:- (train ML only from existing signals)
  python backtest_historical.py --train --symbol XAUUSD

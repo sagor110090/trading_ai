@@ -45,7 +45,7 @@ Fetch Candles (M5/H1/H4) → Store in DB
   → Verify Pending Signals (WIN/LOSS labels)
   → Weekly Close Check → Position Monitor Sync
   → Compute Features (17 indicators + session)
-  → Generate Signal (3 trade modes via confluence)
+  → Generate Signal (day trading via confluence)
   → Score Signal (weighted multi-factor, 0-100)
   → ML Predict (blocks trades below threshold)
   → Position Manager (cooldowns, correlation limits)
@@ -66,7 +66,7 @@ Models saved as `.joblib` + `_features.json` sidecars in `trading_ai/ml/models/`
 
 | Component | Entry | Connects To |
 |-----------|-------|-------------|
-| `signals/engine.py` | `generate_signal()` → dispatches by TRADE_MODE | Reads H4/H1/M5 candles, produces `TradeSignal` |
+| `signals/engine.py` | `generate_signal()` → day trading signal | Reads H4/H1/M5 candles, produces `TradeSignal` |
 | `signals/scoring.py` | `compute_signal_scores()` | Weights: EMA trend (30), RSI (15), MACD (20), ATR (10), structure (15), momentum (10) |
 | `ml/predictor.py` | `predict_signal()` | Loads model by highest AUC, builds feature vector, returns probability |
 | `ml/trainer.py` | `train_models()` | Trains all model types, saves `.joblib` + `_features.json`, stores metadata in DB |
@@ -74,19 +74,17 @@ Models saved as `.joblib` + `_features.json` sidecars in `trading_ai/ml/models/`
 | `trade/executor.py` | `place_trade_unified()` | Places orders on MetaTrader 5 |
 | `ml/drift_detection.py` | `DriftDetector` | Tracks predictions vs outcomes per best-AUC model |
 
-### Trade Modes
+### Trade Mode
 
 | Mode | SL | TP | Min Conf | Max Hold |
 |------|----|----|----------|----------|
-| Scalping | 0.5× ATR | 0.8× ATR | 20% | 30 min |
 | Day Trading | 0.7× ATR | 1.2× ATR | 20% | 240 min |
-| Swing | 2.0× ATR | 3.0× ATR | 25% | 1440 min |
 
-Controlled by `TRADE_MODE` env var. Signal engine dispatches to `generate_signal_scalping()`, `generate_signal_day_trading()`, or `generate_signal_swing()`.
+The application uses day trading exclusively (`generate_signal_day_trading()`). The `TRADE_MODE` env var is kept for backward compatibility but ignored.
 
 ## Configuration
 
-All settings in `config/settings.py`, loaded from `.env` via `python-dotenv`. Settings are frozen dataclasses — `SETTINGS: Final`. Key env vars: `TRADING_PLATFORM` (MT5/CAPITAL), `USE_SQLITE` (true/false), `TRADE_MODE`, `AUTO_TRADE`, `SYMBOLS`, `ML_PREDICTION_THRESHOLD`, `POSITION_TIMEOUT_ENABLED` (on/off), `POSITION_TIMEOUT_MINUTES` (override hold time, 0=use mode default). See `.env.example` for full reference.
+All settings in `config/settings.py`, loaded from `.env` via `python-dotenv`. Settings are frozen dataclasses — `SETTINGS: Final`. Key env vars: `TRADING_PLATFORM` (MT5/CAPITAL), `USE_SQLITE` (true/false), `AUTO_TRADE`, `SYMBOLS`, `ML_PREDICTION_THRESHOLD`, `POSITION_TIMEOUT_ENABLED` (on/off), `POSITION_TIMEOUT_MINUTES` (override hold time, 0=use day_trading default of 240 min). See `.env.example` for full reference.
 
 ## Database
 

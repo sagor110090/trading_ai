@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from config.settings import SETTINGS, SignalType
+from config.settings import SETTINGS, SignalType, SignalWeights
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,9 @@ class FactorScores:
     total: float
 
 
-def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float) -> float:
-    """Score EMA trend alignment. Returns 0 to WEIGHTS.ema_trend.
+def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float,
+                     max_score: float | None = None) -> float:
+    """Score EMA trend alignment. Returns 0 to weights.ema_trend.
 
     Two-tier scoring (weak alignment removed — too many false signals):
     - Strong: all 3 EMAs aligned + price above/below → full score
@@ -54,7 +55,8 @@ def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float) ->
     if pd.isna(ema20) or pd.isna(ema50) or close == 0:
         return 0.0
 
-    max_score = WEIGHTS.ema_trend
+    if max_score is None:
+        max_score = WEIGHTS.ema_trend
     ema_spread = abs(ema20 - ema50) / close
 
     # Check for flat/choppy market: EMAs too close together
@@ -78,8 +80,8 @@ def _score_ema_trend(ema20: float, ema50: float, ema200: float, close: float) ->
     return 0.0
 
 
-def _score_rsi(rsi: float, direction: SignalType) -> float:
-    """Score RSI factor — DIRECTIONAL. Returns -WEIGHTS.rsi to +WEIGHTS.rsi.
+def _score_rsi(rsi: float, direction: SignalType, max_score: float | None = None) -> float:
+    """Score RSI factor — DIRECTIONAL. Returns -weights.rsi to +weights.rsi.
 
     RSI now contributes positively when confirming direction and
     negatively when contradicting. Neutral zone (40-60) scores 0.
@@ -88,7 +90,8 @@ def _score_rsi(rsi: float, direction: SignalType) -> float:
     if pd.isna(rsi):
         return 0.0
 
-    max_score = WEIGHTS.rsi
+    if max_score is None:
+        max_score = WEIGHTS.rsi
 
     if direction == SignalType.BUY:
         # BUY signals: low RSI is bullish (oversold = bounce potential)
@@ -128,12 +131,14 @@ def _score_rsi(rsi: float, direction: SignalType) -> float:
     return 0.0
 
 
-def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float:
-    """Score MACD factor. Returns 0 to WEIGHTS.macd."""
+def _score_macd(macd_hist: float, macd_line: float, macd_signal: float,
+                max_score: float | None = None) -> float:
+    """Score MACD factor. Returns 0 to weights.macd."""
     if pd.isna(macd_hist):
         return 0.0
 
-    max_score = WEIGHTS.macd
+    if max_score is None:
+        max_score = WEIGHTS.macd
     score = 0.0
 
     # Histogram magnitude (tanh squash preserves magnitude)
@@ -150,12 +155,13 @@ def _score_macd(macd_hist: float, macd_line: float, macd_signal: float) -> float
     return min(score, max_score)
 
 
-def _score_atr(atr: float, close: float) -> float:
-    """Score ATR factor — prefers moderate volatility. Returns 0 to WEIGHTS.atr."""
+def _score_atr(atr: float, close: float, max_score: float | None = None) -> float:
+    """Score ATR factor — prefers moderate volatility. Returns 0 to weights.atr."""
     if pd.isna(atr) or close == 0:
         return 0.0
 
-    max_score = WEIGHTS.atr
+    if max_score is None:
+        max_score = WEIGHTS.atr
     atr_pct = (atr / close) * 100.0
 
     # Sweet spot: 0.05-0.5% ATR relative to price
@@ -169,9 +175,11 @@ def _score_atr(atr: float, close: float) -> float:
         return max_score * 0.2
 
 
-def _score_structure(candle_body_pct: float, upper_wick_pct: float, lower_wick_pct: float) -> float:
-    """Score candle structure factor. Returns 0 to WEIGHTS.structure."""
-    max_score = WEIGHTS.structure
+def _score_structure(candle_body_pct: float, upper_wick_pct: float, lower_wick_pct: float,
+                     max_score: float | None = None) -> float:
+    """Score candle structure factor. Returns 0 to weights.structure."""
+    if max_score is None:
+        max_score = WEIGHTS.structure
 
     body_abs = abs(candle_body_pct) if not pd.isna(candle_body_pct) else 0.0
     upper = upper_wick_pct if not pd.isna(upper_wick_pct) else 0.0
@@ -185,12 +193,14 @@ def _score_structure(candle_body_pct: float, upper_wick_pct: float, lower_wick_p
     return max_score * body_dominance
 
 
-def _score_momentum(momentum_score: float, trend_strength: float) -> float:
-    """Score momentum factor. Returns 0 to WEIGHTS.momentum."""
+def _score_momentum(momentum_score: float, trend_strength: float,
+                    max_score: float | None = None) -> float:
+    """Score momentum factor. Returns 0 to weights.momentum."""
     if pd.isna(momentum_score) or pd.isna(trend_strength):
         return 0.0
 
-    max_score = WEIGHTS.momentum
+    if max_score is None:
+        max_score = WEIGHTS.momentum
 
     alignment = abs(momentum_score + trend_strength) / 200.0
     magnitude = (abs(momentum_score) + abs(trend_strength)) / 200.0
@@ -257,6 +267,7 @@ def compute_signal_scores(
     lower_wick_pct: float,
     momentum_score: float,
     trend_strength: float,
+    weights: SignalWeights | None = None,
 ) -> tuple[FactorScores, SignalType]:
     """Compute weighted factor scores and determine signal direction.
 
@@ -264,7 +275,15 @@ def compute_signal_scores(
     Confidence (total score) measures HOW STRONG the signal is.
     RSI is now directional — confirming RSI adds, contradicting RSI subtracts.
     Flat markets (EMA20 ≈ EMA50) produce NO_TRADE.
+
+    Args:
+        weights: Per-symbol factor weights. If None, falls back to the global
+            ``SETTINGS.signal_weights`` profile. This lets each instrument use a
+            different strategy (e.g. trend-heavy for crypto, structure-heavy for
+            gold) while sharing the same scoring engine.
     """
+    w = weights if weights is not None else WEIGHTS
+
     # Direction from EMAs (primary)
     direction = _determine_ema_direction(ema20, ema50, ema200, close)
 
@@ -280,13 +299,14 @@ def compute_signal_scores(
         else:
             return FactorScores(0, 0, 0, 0, 0, 0, 0), SignalType.NO_TRADE
 
-    # Compute all factor scores
-    ema_score = _score_ema_trend(ema20, ema50, ema200, close)
-    rsi_score = _score_rsi(rsi, direction)  # Now directional
-    macd_score = _score_macd(macd_histogram, macd_line, macd_signal)
-    atr_score = _score_atr(atr, close)
-    struct_score = _score_structure(candle_body_pct, upper_wick_pct, lower_wick_pct)
-    mom_score = _score_momentum(momentum_score, trend_strength)
+    # Compute all factor scores (threading per-symbol weights through)
+    ema_score = _score_ema_trend(ema20, ema50, ema200, close, max_score=w.ema_trend)
+    rsi_score = _score_rsi(rsi, direction, max_score=w.rsi)  # Now directional
+    macd_score = _score_macd(macd_histogram, macd_line, macd_signal, max_score=w.macd)
+    atr_score = _score_atr(atr, close, max_score=w.atr)
+    struct_score = _score_structure(candle_body_pct, upper_wick_pct, lower_wick_pct,
+                                    max_score=w.structure)
+    mom_score = _score_momentum(momentum_score, trend_strength, max_score=w.momentum)
 
     total = ema_score + rsi_score + macd_score + atr_score + struct_score + mom_score
 

@@ -23,6 +23,9 @@ CORRELATION_GROUPS = {
     "METALS": [
         "XAUUSD",  # Gold
     ],
+    "CRYPTO": [
+        "BTCUSD",  # Bitcoin
+    ],
 }
 
 

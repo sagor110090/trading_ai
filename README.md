@@ -117,7 +117,7 @@ Edit `.env` with your credentials and preferences:
 | Key | Description | Example |
 |-----|-------------|---------|
 | `USE_SQLITE` | Use SQLite instead of MySQL | `true` |
-| `TRADE_MODE` | `scalping` / `day_trading` / `swing` | `day_trading` |
+| `TRADE_MODE` | Fixed to `day_trading` (kept for backward compat, ignored) | `day_trading` |
 | `AUTO_TRADE` | Place real orders | `true` or `false` |
 | `TRAILING_STOP_ENABLED` | Move SL at profit milestones | `true` |
 | `SYMBOLS` | Comma-separated symbols | `BTCUSD,XAUUSD,ETHUSD,EURUSD,GBPUSD` |
@@ -181,29 +181,23 @@ python -m trading_ai.main --loop --interval 300
 
 ---
 
-## Trade Modes
+## Trade Mode
 
 | Mode | H4 Role | H1 Role | M5 Role | SL | TP | Min Conf | Max Hold | Run Interval |
 |------|---------|---------|---------|-----|-----|----------|----------|-------------|
-| **Scalping** | — | Trend | Entry | 0.5× ATR | 0.8× ATR | 30% | 30 min | 60–120s |
 | **Day Trading** | Must not oppose | Trend | Entry | 1.0× ATR | 1.5× ATR | 35% | 2 hr | 300s |
-| **Swing** | Boss trend | Must confirm | Support | 2.0× ATR | 3.0× ATR | 40% | 8 hr | 900s |
+
+The application runs day trading exclusively.
 
 ### Confluence Logic
 
-**Scalping** — H1 provides direction. M5 momentum must agree (or be neutral). Tight stops, quick in/out.
-
 **Day Trading** — H1 provides direction. H4 must not oppose (opposite H4 = blocked). M5 agreement gives bonus. Medium stops, close same day.
-
-**Swing** — H4 is the boss. H1 must confirm H4 direction. M5 supports entry. Wide stops, hold hours to days.
 
 ### Position Timeout
 
-Open positions that exceed the mode's max hold time are automatically closed:
+Open positions that exceed the max hold time are automatically closed:
 
-- Scalping: close after 30 minutes
 - Day Trading: close after 2 hours
-- Swing: close after 8 hours
 
 ---
 
@@ -216,7 +210,7 @@ Three gradient boosting classifiers are trained in parallel:
 | Model | Hyperparams | File Size |
 |-------|-------------|-----------|
 | XGBoost | 500 trees, depth 6, lr 0.05, subsample 0.8 | ~355 KB |
-| LightGBM | 500 trees, depth 6, lr 0.05, binary objective | ~15 KB |
+| HistGBT | 500 trees, depth 4, lr 0.05, early stopping | ~15 KB |
 | CatBoost | 500 iterations, depth 6, lr 0.05, Logloss | ~47 KB |
 
 ### Features (18 columns)
@@ -371,11 +365,11 @@ trading_ai/
 │
 ├── signals/
 │   ├── scoring.py              # 6-factor weighted confidence scoring
-│   └── engine.py               # Multi-TF confluence engine (3 trade modes)
+│   └── engine.py               # Multi-TF confluence engine (day trading)
 │
 ├── ml/
 │   ├── dataset.py              # Build training dataset from verified signals
-│   ├── trainer.py              # Train XGBoost/LightGBM/CatBoost
+│   ├── trainer.py              # Train XGBoost/HistGBT/CatBoost
 │   ├── predictor.py            # Live ML prediction / filtering
 │   └── models/                 # Saved .joblib model files + _features.json
 │
@@ -585,7 +579,7 @@ First run on BTCUSD with 4 weeks of M5 data:
 | Walk-forward validation | Strict temporal ordering, no future data leakage |
 | 3 fallback split strategies | Handles any dataset size from 20 to 10,000+ signals |
 | Duplicate position check | Prevents opening two trades on the same symbol |
-| Trade timeout per mode | Scalping shouldn't hold for hours; swing needs days |
+| Trade timeout | Closes positions that exceed the max hold time |
 | `train_signal_count` in meta | Prevents re-training every cycle when no new data |
 | Rich terminal output | Color-coded panels make decisions instantly visible |
 | Historical backfill | Train ML in minutes from old data instead of waiting weeks |
@@ -619,14 +613,11 @@ python -m trading_ai.backtest_historical --symbol ETHUSD --weeks 4
 python -m trading_ai.main --loop
 ```
 
-### Switch Trade Mode
+### Retrain Models
 
 ```bash
-# Edit .env
-TRADE_MODE=scalping   # or day_trading, swing
-
-# Re-backfill with new mode and retrain
-python -m trading_ai.backtest_historical --mode scalping --reset
+# Re-backfill and retrain (day trading is the only mode)
+python -m trading_ai.backtest_historical --reset
 
 # Run live
 python -m trading_ai.main --loop

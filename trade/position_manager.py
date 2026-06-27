@@ -43,40 +43,17 @@ logger = logging.getLogger(__name__)
 
 
 # ── Cooldown durations (minutes) after a position closes ──────────────────
+# day_trading is the only supported mode; these are the day_trading values.
 
-COOLDOWN_AFTER_LOSS: dict[str, int] = {
-    "scalping": 15,
-    "day_trading": 30,
-    "swing": 60,
-}
-
-COOLDOWN_AFTER_BREAKEVEN: dict[str, int] = {
-    "scalping": 8,
-    "day_trading": 15,
-    "swing": 30,
-}
-
-COOLDOWN_AFTER_WIN: dict[str, int] = {
-    "scalping": 5,
-    "day_trading": 10,
-    "swing": 15,
-}
-
-# Cooldown after strength exit (weak trend, position closed early)
-# Longer than normal win because the trade was struggling
-COOLDOWN_AFTER_STRENGTH_EXIT: dict[str, int] = {
-    "scalping": 15,   # Same as breakeven
-    "day_trading": 30,  # Same as loss cooldown
-    "swing": 45,   # Between win (15) and loss (60)
-}
+COOLDOWN_AFTER_LOSS: int = 30
+COOLDOWN_AFTER_BREAKEVEN: int = 15
+COOLDOWN_AFTER_WIN: int = 10
+# Cooldown after strength exit (weak trend, position closed early).
+# Same as loss cooldown — the trade was struggling.
+COOLDOWN_AFTER_STRENGTH_EXIT: int = 30
 
 # ── Signal dedup window (minutes) ────────────────────────────────────────
-
-SIGNAL_DEDUP_WINDOWS: dict[str, int] = {
-    "scalping": 15,
-    "day_trading": 60,
-    "swing": 240,
-}
+SIGNAL_DEDUP_WINDOW: int = 60
 
 
 @dataclass
@@ -164,13 +141,13 @@ class PositionManager:
     # ── Signal dedup ──────────────────────────────────────────────────────
 
     def is_duplicate_signal(
-        self, symbol: str, direction: str, trade_mode: str
+        self, symbol: str, direction: str
     ) -> bool:
         """Check if a recent signal already exists for this symbol+direction.
 
         Prevents storing redundant signals that would pollute ML training.
         """
-        dedup_minutes = SIGNAL_DEDUP_WINDOWS.get(trade_mode, 60)
+        dedup_minutes = SIGNAL_DEDUP_WINDOW
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=dedup_minutes)
 
         with get_session() as session:
@@ -304,7 +281,6 @@ class PositionManager:
                 after the original close.
         """
         canonical_symbol = self.canonicalize_symbol(symbol)
-        trade_mode = SETTINGS.trade_mode.value
         now = datetime.now(timezone.utc)
         close_key = str(deal_id) if deal_id else None
 
@@ -326,7 +302,7 @@ class PositionManager:
                     until=now,
                 )
 
-            cooldown_minutes = self._resolve_cooldown_minutes(trade_mode, reason, canonical_symbol)
+            cooldown_minutes = self._resolve_cooldown_minutes(reason, canonical_symbol)
             fast_market_mult = self.get_fast_market_multiplier(canonical_symbol)
             cooldown_start = closed_at if closed_at else now
             until = cooldown_start + timedelta(minutes=cooldown_minutes)
@@ -609,22 +585,22 @@ class PositionManager:
         """Compare broker symbols and strategy symbols using the canonical key."""
         return self.canonicalize_symbol(position_symbol) == self.canonicalize_symbol(requested_symbol)
 
-    def _resolve_cooldown_minutes(self, trade_mode: str, reason: str, symbol: str = "") -> int:
+    def _resolve_cooldown_minutes(self, reason: str, symbol: str = "") -> int:
         """Resolve cooldown duration for a given close reason.
 
         When the market is fast (ATR ratio >= threshold), cooldowns are
         multiplied by the fast market multiplier (e.g. 2x).
         """
         if reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
-            base = COOLDOWN_AFTER_LOSS.get(trade_mode, 30)
+            base = COOLDOWN_AFTER_LOSS
         elif reason == "breakeven":
-            base = COOLDOWN_AFTER_BREAKEVEN.get(trade_mode, 15)
+            base = COOLDOWN_AFTER_BREAKEVEN
         elif reason in ("win", "tp_close"):
-            base = COOLDOWN_AFTER_WIN.get(trade_mode, 10)
+            base = COOLDOWN_AFTER_WIN
         elif reason == "reversal":
             base = 2
         elif reason == "strength_exit":
-            base = COOLDOWN_AFTER_STRENGTH_EXIT.get(trade_mode, 30)
+            base = COOLDOWN_AFTER_STRENGTH_EXIT
         elif reason == "manual_close":
             base = 5
         else:

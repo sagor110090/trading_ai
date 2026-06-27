@@ -345,7 +345,7 @@ def run_walk_forward(
 
     Args:
         symbol: Trading pair symbol (e.g. "BTCUSD").
-        timeframe: Timeframe filter (e.g. "5m", "scalping") or None for all.
+        timeframe: Timeframe filter (e.g. "5m") or None for all.
         model_types: List of model types to train.
 
     Returns a WalkForwardReport per model_type.

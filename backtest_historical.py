@@ -12,7 +12,6 @@ point in time, and verified using only future candles.
 Usage:
     python3 backtest_historical.py                            # Auto-detect & update all stale symbols, then train
     python3 backtest_historical.py --weeks 4 --step 1         # Full backfill for 4 weeks, then train
-    python3 backtest_historical.py --mode day_trading --symbol XAUUSD
     python3 backtest_historical.py --auto --force            # Force-update all symbols regardless of staleness
     python3 backtest_historical.py --reset                    # Delete signals/models then full backfill
     python3 backtest_historical.py --train --symbol XAUUSD    # Train ML only (no backfill)
@@ -31,7 +30,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from config.settings import SETTINGS, Symbol, Timeframe, TradeMode
+from config.settings import SETTINGS, Symbol, Timeframe
 from config.utils import normalize_symbol
 from data.database import create_tables, get_session
 from data.models import Candle, Signal, SignalVerification, MLModelMeta
@@ -215,17 +214,12 @@ class _CandleProxy:
 # ── Main backfill logic ──────────────────────────────────────────────────
 
 
-# Duplicate detection window (minutes) per trade mode
-_DUP_WINDOW = {
-    TradeMode.SCALPING: 15,
-    TradeMode.DAY_TRADING: 60,
-    TradeMode.SWING: 240,
-}
+# Duplicate detection window (minutes) — day_trading uses 60 min
+_DUP_WINDOW = 60
 
 
 def backfill_signals(
     symbol: Symbol,
-    mode: TradeMode,
     weeks: int = 4,
     step: int = 1,
     from_date: Optional[datetime] = None,
@@ -237,7 +231,6 @@ def backfill_signals(
 
     Args:
         symbol: Trading symbol.
-        mode: Trade mode (scalping/day_trading/swing).
         weeks: Weeks of historical data to fetch.
         step: Step size in M5 candles (1 = every 5 min, 12 = every hour).
         from_date: Optional start date for incremental replay. When set, only
@@ -318,10 +311,10 @@ def backfill_signals(
         console.print(f"[bold yellow]⚠ Not enough new M5 data ({total_m5}) for replay in this window[/]")
         return {"error": "insufficient_m5"}
 
-    dup_window = _DUP_WINDOW.get(mode, 60)
+    dup_window = _DUP_WINDOW
 
     console.print(
-        f"\n[bold]🔄 Replaying {symbol.value} in {mode.value} mode[/]\n"
+        f"\n[bold]🔄 Replaying {symbol.value} (day_trading)[/]\n"
         f"  [dim]M5 range[/]  {df_m5.iloc[start_idx]['timestamp']} → {df_m5.iloc[end_idx]['timestamp']}\n"
         f"  [dim]Step[/]  every {step} M5 candles ({step * 5} min)\n"
         f"  [dim]Dup window[/]  {dup_window} min\n"
@@ -374,7 +367,7 @@ def backfill_signals(
                 if len(df_h1_slice) < 200:
                     progress.update(task, advance=step, info="H1 warming up")
                     continue
-                if mode != TradeMode.SCALPING and len(df_h4_slice) < 5:
+                if len(df_h4_slice) < 5:
                     progress.update(task, advance=step, info="H4 warming up")
                     continue
 
@@ -383,7 +376,7 @@ def backfill_signals(
                 # ── Generate signal at this historical point ──
                 try:
                     trade_signal = generate_signal(
-                        df_h4_slice, df_h1_slice, df_m5_slice, symbol, mode, prefix="backtest_"
+                        df_h4_slice, df_h1_slice, df_m5_slice, symbol, prefix="backtest_"
                     )
                 except Exception as e:
                     logger.debug("Signal error at %s: %s", m5_ts, e)
@@ -743,7 +736,6 @@ def train_if_needed(symbol: str, new_verified_count: int) -> bool:
 
 def run_backfill(
     symbols: list[Symbol] = None,
-    mode: TradeMode = None,
     weeks: int = 4,
     step: int = 1,
     reset: bool = False,
@@ -755,12 +747,10 @@ def run_backfill(
     """
     if symbols is None:
         symbols = SETTINGS.symbols
-    if mode is None:
-        mode = SETTINGS.trade_mode
 
     console.print(Panel(
         f"[bold]Historical Backfill[/]\n"
-        f"  [dim]Mode[/]    {mode.value}\n"
+        f"  [dim]Mode[/]    day_trading\n"
         f"  [dim]Symbols[/]  {', '.join(s.value for s in symbols)}\n"
         f"  [dim]Weeks[/]    {weeks}\n"
         f"  [dim]Step[/]     every {step} M5 candle ({step * 5} min)\n"
@@ -782,7 +772,7 @@ def run_backfill(
 
     for symbol in symbols:
         console.print(f"\n[bold cyan]═══ {symbol.value} ═══[/]")
-        stats = backfill_signals(symbol, mode, weeks=weeks, step=step)
+        stats = backfill_signals(symbol, weeks=weeks, step=step)
         if "error" in stats:
             continue
         for k in total_stats:
@@ -813,7 +803,6 @@ def run_backfill(
 def run_auto_backfill(
     symbols: Optional[List[Symbol]] = None,
     force: bool = False,
-    mode: TradeMode = None,
     days: Optional[int] = None,
     reset: bool = False,
 ) -> dict:
@@ -822,7 +811,6 @@ def run_auto_backfill(
     Args:
         symbols: Symbols to process (None = all configured symbols).
         force: Force update all symbols regardless of staleness.
-        mode: Trade mode (None = from settings).
         days: Number of days to backtest (None = auto-detect new data only).
         reset: Delete existing signals/models before backtesting.
 
@@ -831,15 +819,13 @@ def run_auto_backfill(
     """
     if symbols is None:
         symbols = list(SETTINGS.symbols)
-    if mode is None:
-        mode = SETTINGS.trade_mode
 
     display_days = f"{days} days" if days else "auto-detect"
     display_reset = "ON (will delete existing signals)" if reset else "OFF"
 
     console.print(Panel(
         f"[bold]Automated Backtest & ML Pipeline[/]\n"
-        f"  [dim]Mode[/]  {mode.value}\n"
+        f"  [dim]Mode[/]  day_trading\n"
         f"  [dim]Symbols[/]  {', '.join(s.value for s in symbols)}\n"
         f"  [dim]Days[/]  {display_days}\n"
         f"  [dim]Reset[/]  {display_reset}\n"
@@ -890,7 +876,7 @@ def run_auto_backfill(
             if effective_days is not None:
                 weeks = max(1, effective_days // 7)
                 console.print(f"\n[bold]🔄 Full backfill for {effective_days} days ({weeks} weeks)[/]")
-                signal_results = backfill_signals(symbol, mode, weeks=weeks, step=12)
+                signal_results = backfill_signals(symbol, weeks=weeks, step=12)
 
                 if "error" in signal_results:
                     console.print(f"[yellow]⚠ Backfill error: {signal_results.get('error')}[/]")
@@ -921,7 +907,7 @@ def run_auto_backfill(
                 # Use a short weeks window so backfill_signals loads enough history
                 # for indicators, but only replays from from_date onward.
                 signal_results = backfill_signals(
-                    symbol, mode, weeks=4, step=12, from_date=from_date,
+                    symbol, weeks=4, step=12, from_date=from_date,
                 )
 
                 if "error" in signal_results:
@@ -981,14 +967,12 @@ def run_auto_backfill(
     return results
 
 
-def run_train_only(symbols: List[Symbol], mode: TradeMode = None) -> None:
+def run_train_only(symbols: List[Symbol]) -> None:
     """Train ML models from existing verified signals (no backfill)."""
-    if mode is None:
-        mode = SETTINGS.trade_mode
 
     console.print(Panel(
         f"[bold]ML Training Only[/]\n"
-        f"  [dim]Mode[/]    {mode.value}\n"
+        f"  [dim]Mode[/]    day_trading\n"
         f"  [dim]Symbols[/]  {', '.join(s.value for s in symbols)}",
         border_style="cyan",
     ))
@@ -1057,13 +1041,8 @@ def main() -> None:
         help="Step size in M5 candles: 1=5min, 12=1hr (default: 1, auto mode uses 12)"
     )
     parser.add_argument(
-        "--mode", type=str, default=None,
-        choices=["scalping", "day_trading", "swing"],
-        help="Trade mode (default: from .env TRADE_MODE)"
-    )
-    parser.add_argument(
         "--symbol", type=str, default=None,
-        choices=["XAUUSD"],
+        choices=["XAUUSD", "BTCUSD"],
         help="Single symbol to process (default: from .env SYMBOLS)"
     )
     parser.add_argument(
@@ -1088,8 +1067,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    mode = TradeMode(args.mode) if args.mode else SETTINGS.trade_mode
-
     if args.symbol:
         symbols = [Symbol(args.symbol)]
     elif args.symbols:
@@ -1099,20 +1076,19 @@ def main() -> None:
 
     # --train: ML training only, no backfill
     if args.train:
-        run_train_only(symbols, mode=mode)
+        run_train_only(symbols)
         return
 
     # --weeks or --days: explicit full backfill over that range
     if args.weeks is not None or args.days is not None:
         weeks = args.weeks if args.weeks is not None else max(1, args.days // 7)
-        run_backfill(symbols=symbols, mode=mode, weeks=weeks, step=args.step, reset=args.reset)
+        run_backfill(symbols=symbols, weeks=weeks, step=args.step, reset=args.reset)
         return
 
     # Default & --auto: auto-detect stale symbols and incrementally update
     run_auto_backfill(
         symbols=symbols,
         force=args.force,
-        mode=mode,
         days=args.days,
         reset=args.reset,
     )

@@ -1,6 +1,6 @@
 """Central configuration for the trading prediction system."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Final
 
@@ -8,6 +8,8 @@ from typing import Final
 class Symbol(str, Enum):
     # Metals
     XAUUSD = "XAUUSD"
+    # Crypto
+    BTCUSD = "BTCUSD"
 
 
 class Timeframe(str, Enum):
@@ -39,9 +41,9 @@ class Session(str, Enum):
 
 
 class TradeMode(str, Enum):
-    SCALPING = "scalping"
     DAY_TRADING = "day_trading"
-    SWING = "swing"
+    # The application now uses day_trading exclusively. The enum is kept
+    # so existing imports (TradeMode.DAY_TRADING) continue to resolve.
 
 
 @dataclass(frozen=True)
@@ -105,17 +107,29 @@ class SignalThresholds:
     confidence_max: float = 100.0
 
 
-@dataclass(frozen=True)
-class ScalpingConfig:
-    """Scalping: fast in, fast out. M5 entry, H1 trend only."""
-    sl_atr_mult: float = 0.5
-    tp_atr_mult: float = 0.8
-    confidence_threshold: float = 30.0  # Raised from 20 for higher quality signals
-    trend_timeframe: str = "1h"
-    entry_timeframe: str = "5m"
-    confluence_label: str = "scalping"
-    # Max time a scalping trade stays open (minutes)
-    max_hold_minutes: int = 30
+# ---------------------------------------------------------------------------
+# Per-symbol strategy profiles
+#
+# Gold (XAUUSD) and Bitcoin (BTCUSD) have very different volatility and
+# micro-structure, so they are scored with different factor weights:
+#   - Gold respects technical levels / RSI mean-reversion  -> structure + RSI heavy
+#   - Crypto trends hard but is noisy / fakeout-prone      -> trend + momentum heavy
+# Weights always sum to 100. These are defaults; every factor can be overridden
+# individually via env vars  SYMBOL_WEIGHT_<SYMBOL>_<FACTOR>  (see load_settings).
+# ---------------------------------------------------------------------------
+_SYMBOL_WEIGHT_DEFAULTS: dict[str, SignalWeights] = {
+    "XAUUSD": SignalWeights(
+        ema_trend=28.0, rsi=18.0, macd=18.0, atr=10.0, structure=16.0, momentum=10.0,
+    ),
+    "BTCUSD": SignalWeights(
+        ema_trend=34.0, rsi=10.0, macd=22.0, atr=8.0, structure=10.0, momentum=16.0,
+    ),
+}
+
+_SYMBOL_THRESHOLD_DEFAULTS: dict[str, SignalThresholds] = {
+    "XAUUSD": SignalThresholds(buy_threshold=40.0, sell_threshold=40.0),
+    "BTCUSD": SignalThresholds(buy_threshold=45.0, sell_threshold=45.0),
+}
 
 
 @dataclass(frozen=True)
@@ -130,20 +144,6 @@ class DayTradingConfig:
     confluence_label: str = "day_trading"
     # Max time a day trade stays open (minutes)
     max_hold_minutes: int = 240
-
-
-@dataclass(frozen=True)
-class SwingConfig:
-    """Swing: hold hours to days. H4+H1 must agree, M5 entry trigger."""
-    sl_atr_mult: float = 2.0
-    tp_atr_mult: float = 3.0
-    confidence_threshold: float = 35.0  # Raised from 25 for higher quality signals
-    trend_timeframe: str = "4h"
-    confirmation_timeframe: str = "1h"
-    entry_timeframe: str = "5m"
-    confluence_label: str = "swing"
-    # Max time a swing trade stays open (minutes)
-    max_hold_minutes: int = 1440
 
 
 @dataclass(frozen=True)
@@ -228,9 +228,7 @@ class VerificationConfig:
     # Max candles to check for SL/TP hit before declaring BREAKEVEN
     # If SL/TP is hit within fewer candles, it's verified immediately.
     # Dynamic calculation: max_hold_minutes / 5 (for M5 candles)
-    # - Scalping (30 min) → 6 candles
-    # - Day trading (120 min) → 24 candles
-    # - Swing (480 min) → 96 candles
+    # - Day trading (240 min) → 48 candles
     # This value is used as fallback when dynamic calculation is not available.
     lookahead_candles: int = 100
     # Minimum candles before we try to verify. If fewer candles exist after
@@ -273,9 +271,11 @@ class Settings:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     signal_weights: SignalWeights = field(default_factory=SignalWeights)
     signal_thresholds: SignalThresholds = field(default_factory=SignalThresholds)
-    scalping: ScalpingConfig = field(default_factory=ScalpingConfig)
+    # Per-symbol factor-weight overrides (dict[symbol] -> dict[factor] -> float).
+    # Applied on top of _SYMBOL_WEIGHT_DEFAULTS; see get_signal_weights().
+    symbol_weight_overrides: dict = field(default_factory=lambda: {})
+    symbol_threshold_overrides: dict = field(default_factory=lambda: {})
     day_trading: DayTradingConfig = field(default_factory=DayTradingConfig)
-    swing: SwingConfig = field(default_factory=SwingConfig)
     ml: MLConfig = field(default_factory=MLConfig)
     walk_forward: WalkForwardConfig = field(default_factory=WalkForwardConfig)
     verification: VerificationConfig = field(default_factory=VerificationConfig)
@@ -284,12 +284,13 @@ class Settings:
     # Max positions per correlation group (prevents overexposure)
     max_positions_per_group: dict = field(default_factory=lambda: {
         "METALS": 1,
+        "CRYPTO": 1,
     })
-    trade_mode: TradeMode = TradeMode.SWING
+    trade_mode: TradeMode = TradeMode.DAY_TRADING
     auto_trade: bool = False
     # Position timeout: force-close trades that exceed max hold time
     position_timeout_enabled: bool = True
-    # Override max hold minutes (0 = use trade mode default: scalping=30, day=240, swing=1440)
+    # Override max hold minutes (0 = use day_trading default of 240)
     position_timeout_minutes: int = 0
     trade_sizes: dict = field(default_factory=lambda: {"DEFAULT": 0.01})
     broker_spread_pips: float = 0.0  # Broker execution speed/spread buffer in pips
@@ -306,6 +307,31 @@ class Settings:
         """Get position size for a symbol. Falls back to DEFAULT."""
         return self.trade_sizes.get(symbol, self.trade_sizes.get("DEFAULT", 0.01))
 
+    def get_signal_weights(self, symbol: str) -> SignalWeights:
+        """Get factor weights for a symbol.
+
+        Resolution order:
+          1. Per-factor env overrides on top of the symbol's default profile.
+          2. The symbol's default profile in _SYMBOL_WEIGHT_DEFAULTS.
+          3. The global signal_weights fallback.
+        """
+        base = _SYMBOL_WEIGHT_DEFAULTS.get(symbol, self.signal_weights)
+        overrides = self.symbol_weight_overrides.get(symbol)
+        if not overrides:
+            return base
+        return replace(base, **overrides)
+
+    def get_signal_thresholds(self, symbol: str) -> SignalThresholds:
+        """Get rule-based signal thresholds for a symbol.
+
+        Resolution order: per-symbol env overrides -> symbol default -> global.
+        """
+        base = _SYMBOL_THRESHOLD_DEFAULTS.get(symbol, self.signal_thresholds)
+        overrides = self.symbol_threshold_overrides.get(symbol)
+        if not overrides:
+            return base
+        return replace(base, **overrides)
+
     def get_sl_tp_multipliers(self, symbol: str) -> tuple[float, float]:
         """Get SL and TP multipliers for a symbol.
 
@@ -318,17 +344,9 @@ class Settings:
         tp_mult = self.tp_multipliers.get(symbol)
 
         if sl_mult is None or tp_mult is None:
-            # Use trade mode defaults
-            if self.trade_mode == TradeMode.SCALPING:
-                default_sl = self.scalping.sl_atr_mult
-                default_tp = self.scalping.tp_atr_mult
-            elif self.trade_mode == TradeMode.DAY_TRADING:
-                default_sl = self.day_trading.sl_atr_mult
-                default_tp = self.day_trading.tp_atr_mult
-            else:  # SWING
-                default_sl = self.swing.sl_atr_mult
-                default_tp = self.swing.tp_atr_mult
-
+            # Use day_trading defaults
+            default_sl = self.day_trading.sl_atr_mult
+            default_tp = self.day_trading.tp_atr_mult
             return (sl_mult if sl_mult is not None else default_sl,
                     tp_mult if tp_mult is not None else default_tp)
 
@@ -349,30 +367,20 @@ class Settings:
         return self.ml.prediction_thresholds.get(symbol, self.ml.prediction_thresholds.get("DEFAULT", 0.3))
 
     def get_max_hold_minutes(self) -> int:
-        """Get max hold time in minutes for the current trade mode.
+        """Get max hold time in minutes.
 
         If POSITION_TIMEOUT_MINUTES is set (>0) in .env, it overrides the
-        trade-mode default. Otherwise falls back to the mode-specific value.
+        day_trading default (240). Otherwise falls back to that default.
         """
         if self.position_timeout_minutes > 0:
             return self.position_timeout_minutes
-        if self.trade_mode == TradeMode.SCALPING:
-            return self.scalping.max_hold_minutes
-        elif self.trade_mode == TradeMode.DAY_TRADING:
-            return self.day_trading.max_hold_minutes
-        else:
-            return self.swing.max_hold_minutes
+        return self.day_trading.max_hold_minutes
 
     def get_dynamic_lookahead(self) -> int:
-        """Get dynamic verification lookahead based on trade mode.
+        """Get dynamic verification lookahead based on max hold time.
 
         Uses M5 candles for verification (finest granularity).
         Formula: max_hold_minutes / 5 (for 5-minute candles)
-
-        Examples:
-        - Scalping (30 min) → 6 candles
-        - Day trading (120 min) → 24 candles
-        - Swing (480 min) → 96 candles
 
         Returns:
             Number of M5 candles to check for SL/TP hit.
@@ -384,7 +392,7 @@ class Settings:
         # Divide by 5 for M5 candles, minimum of 5
         dynamic_candles = max(max_hold // 5, self.verification.min_lookahead_candles)
 
-        # Cap at reasonable maximum (swing should still be reasonable)
+        # Cap at reasonable maximum
         return min(dynamic_candles, 200)
 
     symbols: tuple[Symbol, ...] = (Symbol.XAUUSD,)
@@ -422,10 +430,9 @@ def load_settings() -> Settings:
         server=os.getenv("MT5_SERVER", ""),
     )
 
-    # Trade mode
-    mode_str = os.getenv("TRADE_MODE", "swing").lower()
-    mode_map = {"scalping": TradeMode.SCALPING, "day_trading": TradeMode.DAY_TRADING, "swing": TradeMode.SWING}
-    trade_mode = mode_map.get(mode_str, TradeMode.SWING)
+    # Trade mode (day_trading is the only supported mode; TRADE_MODE is kept
+    # for backward compatibility but ignored)
+    trade_mode = TradeMode.DAY_TRADING
 
     # Symbols
     symbols_str = os.getenv("SYMBOLS", "XAUUSD").upper()
@@ -515,7 +522,47 @@ def load_settings() -> Settings:
     # Correlation limit settings
     max_positions_per_group = {
         "METALS": int(os.getenv("MAX_POSITIONS_METALS", "1")),
+        "CRYPTO": int(os.getenv("MAX_POSITIONS_CRYPTO", "1")),
     }
+
+    # Per-symbol factor-weight overrides: SYMBOL_WEIGHT_<SYMBOL>_<FACTOR>=value
+    # e.g. SYMBOL_WEIGHT_BTCUSD_EMA_TREND=40
+    weight_factors = ("EMA_TREND", "RSI", "MACD", "ATR", "STRUCTURE", "MOMENTUM", "TOTAL")
+    symbol_weight_overrides: dict = {}
+    for key, value in os.environ.items():
+        if not key.startswith("SYMBOL_WEIGHT_"):
+            continue
+        rest = key[len("SYMBOL_WEIGHT_"):]  # e.g. BTCUSD_EMA_TREND
+        for factor in weight_factors:
+            suffix = "_" + factor
+            if rest.endswith(suffix):
+                sym = rest[:-len(suffix)]
+                try:
+                    symbol_weight_overrides.setdefault(sym, {})[
+                        factor.lower()
+                    ] = float(value)
+                except ValueError:
+                    pass
+                break
+
+    # Per-symbol signal thresholds: SYMBOL_THRESHOLD_<SYMBOL>_<FIELD>=value
+    threshold_fields = ("BUY_THRESHOLD", "SELL_THRESHOLD")
+    symbol_threshold_overrides: dict = {}
+    for key, value in os.environ.items():
+        if not key.startswith("SYMBOL_THRESHOLD_"):
+            continue
+        rest = key[len("SYMBOL_THRESHOLD_"):]
+        for fld in threshold_fields:
+            suffix = "_" + fld
+            if rest.endswith(suffix):
+                sym = rest[:-len(suffix)]
+                try:
+                    symbol_threshold_overrides.setdefault(sym, {})[
+                        fld.lower()
+                    ] = float(value)
+                except ValueError:
+                    pass
+                break
 
     # Read all ML_PREDICTION_THRESHOLD_<SYMBOL> from env
     prediction_thresholds = {"DEFAULT": float(os.getenv("ML_PREDICTION_THRESHOLD", "0.5"))}
@@ -555,6 +602,8 @@ def load_settings() -> Settings:
             sl_tp_factor=fast_market_sl_tp_factor,
         ),
         max_positions_per_group=max_positions_per_group,
+        symbol_weight_overrides=symbol_weight_overrides,
+        symbol_threshold_overrides=symbol_threshold_overrides,
         trade_mode=trade_mode,
         auto_trade=auto_trade,
         position_timeout_enabled=position_timeout_enabled,

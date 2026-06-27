@@ -41,9 +41,6 @@ SESSION_FEATURE_COLS = [f"session_{cat.lower()}" for cat in SESSION_CATEGORIES]
 # Legacy column name for backward compatibility with old models
 SESSION_ENC_COL = "session_enc"
 
-TRADE_MODES = ["scalping", "day_trading", "swing"]
-MODE_FEATURE_COLS = [f"mode_{m}" for m in TRADE_MODES]
-
 TARGET_COLUMN = "win"
 
 # Per-column NaN defaults: use neutral values instead of blanket 0.
@@ -151,15 +148,6 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     for cat in SESSION_CATEGORIES:
         df[f"session_{cat.lower()}"] = (df["session"] == cat).astype(int)
 
-    # Encode trade_mode with one-hot encoding
-    if "trade_mode" in df.columns:
-        for mode in TRADE_MODES:
-            df[f"mode_{mode}"] = (df["trade_mode"] == mode).astype(int)
-    else:
-        # Fallback: no trade_mode column (old data)
-        for mode in TRADE_MODES:
-            df[f"mode_{mode}"] = 0
-
     # Drop rows where critical indicators are NaN (early candles without enough
     # history). These produce garbage values for dist_ema* when filled to 0.
     rows_before = len(df)
@@ -211,7 +199,7 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
 
 def split_features_target(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     """Split dataset into feature matrix X and target vector y."""
-    feature_cols = FEATURE_COLUMNS + LAG_FEATURE_COLS + SESSION_FEATURE_COLS + MODE_FEATURE_COLS
+    feature_cols = FEATURE_COLUMNS + LAG_FEATURE_COLS + SESSION_FEATURE_COLS
     available = [c for c in feature_cols if c in df.columns]
 
     X = df[available].copy()

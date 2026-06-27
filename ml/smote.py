@@ -64,7 +64,7 @@ def apply_smote(
         # SMOTE generates fractional values for one-hot encoded columns
         # (e.g., session_asian=0.4), which breaks the binary semantics.
         # Round one-hot columns back to {0, 1} so synthetic samples are valid.
-        onehot_cols = [c for c in X_resampled.columns if c.startswith("session_") or c.startswith("mode_")]
+        onehot_cols = [c for c in X_resampled.columns if c.startswith("session_")]
         for col in onehot_cols:
             X_resampled[col] = X_resampled[col].round().astype(int)
 

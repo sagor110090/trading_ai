@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
-from config.settings import SETTINGS, Symbol, TradeMode
+from config.settings import SETTINGS
 from trade.executor import OpenPosition
 from trade.position_manager import (
     COOLDOWN_AFTER_BREAKEVEN,
@@ -23,9 +23,6 @@ from trade.position_manager import (
 )
 from trade.position_monitor import PositionMonitor
 from trade.tp_tracker import TPProgress
-
-# Current trade mode from config (frozen dataclass — read only)
-TRADE_MODE = SETTINGS.trade_mode.value  # e.g. "day_trading"
 
 
 class CooldownLogicTests(unittest.TestCase):
@@ -176,8 +173,8 @@ class CooldownLogicTests(unittest.TestCase):
         )
 
         # The breakeven cooldown should be shorter than the loss cooldown
-        expected_be = COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15)
-        expected_loss = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected_be = COOLDOWN_AFTER_BREAKEVEN
+        expected_loss = COOLDOWN_AFTER_LOSS
         remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
 
         self.assertGreater(remaining, 0.0)
@@ -192,8 +189,8 @@ class CooldownLogicTests(unittest.TestCase):
         manager.register_verified_result("BTCUSD", "BREAKEVEN", signal_id="sig-be-1")
 
         remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
-        expected_be = COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15)
-        expected_loss = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected_be = COOLDOWN_AFTER_BREAKEVEN
+        expected_loss = COOLDOWN_AFTER_LOSS
 
         self.assertGreater(remaining, 0.0)
         self.assertLessEqual(remaining, expected_be + 0.5,
@@ -207,7 +204,7 @@ class CooldownLogicTests(unittest.TestCase):
         manager.register_verified_result("BTCUSD", "WIN", signal_id="sig-win-1")
 
         remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
-        expected = COOLDOWN_AFTER_WIN.get(TRADE_MODE, 10)
+        expected = COOLDOWN_AFTER_WIN
 
         self.assertGreater(remaining, 0.0)
         self.assertLessEqual(remaining, expected + 0.5,
@@ -248,55 +245,53 @@ class CooldownLogicTests(unittest.TestCase):
         # Loss-tier reasons
         for reason in ("loss", "timeout", "external_close", "sl_close", "weekly_close"):
             self.assertEqual(
-                manager._resolve_cooldown_minutes(TRADE_MODE, reason, "BTCUSD"),
-                COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30),
+                manager._resolve_cooldown_minutes(reason, "BTCUSD"),
+                COOLDOWN_AFTER_LOSS,
                 f"Reason '{reason}' should use LOSS cooldown tier",
             )
 
         # Breakeven
         self.assertEqual(
-            manager._resolve_cooldown_minutes(TRADE_MODE, "breakeven", "BTCUSD"),
-            COOLDOWN_AFTER_BREAKEVEN.get(TRADE_MODE, 15),
+            manager._resolve_cooldown_minutes("breakeven", "BTCUSD"),
+            COOLDOWN_AFTER_BREAKEVEN,
         )
 
         # Win-tier reasons
         for reason in ("win", "tp_close"):
             self.assertEqual(
-                manager._resolve_cooldown_minutes(TRADE_MODE, reason, "BTCUSD"),
-                COOLDOWN_AFTER_WIN.get(TRADE_MODE, 10),
+                manager._resolve_cooldown_minutes(reason, "BTCUSD"),
+                COOLDOWN_AFTER_WIN,
                 f"Reason '{reason}' should use WIN cooldown tier",
             )
 
         # Reversal — fixed 2 min
-        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "reversal", "BTCUSD"), 2)
+        self.assertEqual(manager._resolve_cooldown_minutes("reversal", "BTCUSD"), 2)
 
         # Strength exit
         self.assertEqual(
-            manager._resolve_cooldown_minutes(TRADE_MODE, "strength_exit", "BTCUSD"),
-            30,  # COOLDOWN_AFTER_STRENGTH_EXIT["day_trading"]
+            manager._resolve_cooldown_minutes("strength_exit", "BTCUSD"),
+            30,  # COOLDOWN_AFTER_STRENGTH_EXIT
         )
 
         # Manual close — fixed 5 min
-        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "manual_close", "BTCUSD"), 5)
+        self.assertEqual(manager._resolve_cooldown_minutes("manual_close", "BTCUSD"), 5)
 
         # Unknown — default 5 min
-        self.assertEqual(manager._resolve_cooldown_minutes(TRADE_MODE, "unknown_reason", "BTCUSD"), 5)
+        self.assertEqual(manager._resolve_cooldown_minutes("unknown_reason", "BTCUSD"), 5)
 
     def test_breakeven_cooldown_shorter_than_loss(self) -> None:
-        """Breakeven cooldown must always be shorter than loss cooldown across all modes."""
-        for mode in ("scalping", "day_trading", "swing"):
-            be = COOLDOWN_AFTER_BREAKEVEN.get(mode, 15)
-            loss = COOLDOWN_AFTER_LOSS.get(mode, 30)
-            self.assertLessEqual(be, loss,
-                                 f"Breakeven ({be} min) should be ≤ loss ({loss} min) for {mode}")
+        """Breakeven cooldown must always be shorter than loss cooldown."""
+        be = COOLDOWN_AFTER_BREAKEVEN
+        loss = COOLDOWN_AFTER_LOSS
+        self.assertLessEqual(be, loss,
+                             f"Breakeven ({be} min) should be ≤ loss ({loss} min)")
 
     def test_win_cooldown_shorter_than_loss(self) -> None:
-        """Win cooldown must always be shorter than loss cooldown across all modes."""
-        for mode in ("scalping", "day_trading", "swing"):
-            win = COOLDOWN_AFTER_WIN.get(mode, 10)
-            loss = COOLDOWN_AFTER_LOSS.get(mode, 30)
-            self.assertLessEqual(win, loss,
-                                 f"Win ({win} min) should be ≤ loss ({loss} min) for {mode}")
+        """Win cooldown must always be shorter than loss cooldown."""
+        win = COOLDOWN_AFTER_WIN
+        loss = COOLDOWN_AFTER_LOSS
+        self.assertLessEqual(win, loss,
+                             f"Win ({win} min) should be ≤ loss ({loss} min)")
 
     # ── Fast market cooldown tests ────────────────────────────────────────
 
@@ -315,9 +310,9 @@ class CooldownLogicTests(unittest.TestCase):
             source="unit_test",
         )
 
-        # Default trade mode is swing, so loss cooldown is 60 min
-        # With 2x multiplier, it should be 120 min
-        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        # Default trade mode is day_trading, so loss cooldown is 30 min
+        # With 2x multiplier, it should be 60 min
+        expected_base = COOLDOWN_AFTER_LOSS
         expected_extended = int(expected_base * SETTINGS.fast_market.cooldown_multiplier)
         remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
 
@@ -340,7 +335,7 @@ class CooldownLogicTests(unittest.TestCase):
             source="unit_test",
         )
 
-        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected_base = COOLDOWN_AFTER_LOSS
         remaining = manager.get_cooldown_remaining_minutes("BTCUSD")
 
         # Should be the base cooldown, not extended
@@ -360,7 +355,7 @@ class CooldownLogicTests(unittest.TestCase):
             source="unit_test",
         )
 
-        expected_base = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected_base = COOLDOWN_AFTER_LOSS
         remaining = manager.get_cooldown_remaining_minutes("ETHUSD")
 
         self.assertLessEqual(remaining, expected_base + 1.0,
@@ -454,7 +449,7 @@ class CooldownLogicTests(unittest.TestCase):
 
         self.assertTrue(manager.is_active("XAUUSD"))
         remaining = manager.get_cooldown_remaining_minutes("XAUUSD")
-        expected = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30) - 5  # 30 min - 5 min already passed
+        expected = COOLDOWN_AFTER_LOSS - 5  # 30 min - 5 min already passed
         # Allow 1 min tolerance for test execution time
         self.assertAlmostEqual(remaining, expected, delta=1.0,
                                msg=f"Expected ~{expected:.0f} min remaining, got {remaining:.1f}")
@@ -469,7 +464,7 @@ class CooldownLogicTests(unittest.TestCase):
 
         self.assertTrue(manager.is_active("XAUUSD"))
         remaining = manager.get_cooldown_remaining_minutes("XAUUSD")
-        expected = COOLDOWN_AFTER_LOSS.get(TRADE_MODE, 30)
+        expected = COOLDOWN_AFTER_LOSS
         self.assertAlmostEqual(remaining, expected, delta=1.0)
 
     def test_no_double_cooldown_from_verified_after_original_expires(self) -> None:

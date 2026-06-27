@@ -1,8 +1,6 @@
-"""Multi-timeframe confluence signal engine with 3 trade modes.
+"""Multi-timeframe confluence signal engine (day trading).
 
-Scalping:  M5 entry + H1 trend only. Tight stops. Fast in/out.
 Day trade: M5 entry + H1 trend + M15 confirmation (resampled from M5). Medium stops. Close same day.
-Swing:     H4+H1 must agree + M5 trigger. Wide stops. Hold hours-days.
 """
 
 import logging
@@ -13,7 +11,7 @@ from typing import Optional
 import pandas as pd
 
 from config.settings import (
-    SETTINGS, SignalType, Symbol, Timeframe, TradeMode,
+    SETTINGS, SignalType, SignalWeights, Symbol, Timeframe,
 )
 from indicators.features import FeatureSet, compute_all_features, extract_feature_set_with_lags
 from signals.scoring import FactorScores, compute_signal_scores
@@ -54,7 +52,9 @@ class TradeSignal:
     trade_mode: str
 
 
-def _get_direction_from_df(df: pd.DataFrame) -> tuple[SignalType, FactorScores, FeatureSet, float]:
+def _get_direction_from_df(
+    df: pd.DataFrame, weights: SignalWeights | None = None,
+) -> tuple[SignalType, FactorScores, FeatureSet, float]:
     """Compute direction, scores, and features from the latest candle."""
     df_features = compute_all_features(df)
     idx = len(df_features) - 1
@@ -79,6 +79,7 @@ def _get_direction_from_df(df: pd.DataFrame) -> tuple[SignalType, FactorScores, 
         lower_wick_pct=features.lower_wick_pct or 0,
         momentum_score=features.momentum_score or 0,
         trend_strength=features.trend_strength or 0,
+        weights=weights,
     )
 
     return direction, scores, features, row["close"]
@@ -89,9 +90,10 @@ def _pips_to_price(pips: float, symbol: Symbol, entry: float) -> float:
 
     Different instruments have different pip values:
     - Gold (XAUUSD): 1 pip = 0.01
+    - Bitcoin (BTCUSD): 1 pip = 0.01 (quotes to 2 decimals, e.g. 65432.15)
     """
-    # Metals (Gold, Silver)
-    if symbol in [Symbol.XAUUSD]:
+    # Metals & crypto both quote to 2 decimals -> 1 pip = 0.01 price units
+    if symbol in [Symbol.XAUUSD, Symbol.BTCUSD]:
         return pips * 0.01
 
     return pips * 0.01
@@ -133,8 +135,13 @@ def _compute_stop_take(
 
     if atr is None or atr <= 0 or pd.isna(atr):
         if symbol == Symbol.XAUUSD:
+            # Gold: ~0.15% SL / ~0.25% TP of entry (low volatility)
             sl_distance = entry * 0.0015
             tp_distance = entry * 0.0025
+        elif symbol == Symbol.BTCUSD:
+            # Bitcoin: ~1.5% SL / ~2.5% TP of entry (3-5x more volatile than gold)
+            sl_distance = entry * 0.015
+            tp_distance = entry * 0.025
         else:
             sl_distance = entry * 0.02
             tp_distance = entry * 0.03
@@ -180,7 +187,9 @@ def _compute_stop_take(
     return round(stop_loss, 5), round(take_profit, 5)
 
 
-def _get_m5_direction(df_m5: pd.DataFrame) -> tuple[SignalType, float, float]:
+def _get_m5_direction(
+    df_m5: pd.DataFrame, weights: SignalWeights | None = None,
+) -> tuple[SignalType, float, float]:
     """Full scoring-based M5 direction check.
 
     Uses the same scoring engine as H1/H4 but with a minimum confidence gate.
@@ -192,14 +201,15 @@ def _get_m5_direction(df_m5: pd.DataFrame) -> tuple[SignalType, float, float]:
     if df_m5.empty or len(df_m5) < 50:
         return SignalType.NO_TRADE, 0.0, 0.0
 
-    m5_dir, m5_scores, m5_feat, _ = _get_direction_from_df(df_m5)
+    m5_dir, m5_scores, m5_feat, _ = _get_direction_from_df(df_m5, weights=weights)
     m5_momentum = float(m5_feat.momentum_score or 0)
 
     if m5_dir == SignalType.NO_TRADE:
         return SignalType.NO_TRADE, 0.0, m5_momentum
 
     # Minimum confidence gate: M5 must have meaningful direction strength
-    m5_confidence = min(m5_scores.total / WEIGHTS.total * 100.0, 100.0)
+    total_basis = (weights.total if weights is not None else WEIGHTS.total) or 100.0
+    m5_confidence = min(m5_scores.total / total_basis * 100.0, 100.0)
     if m5_confidence < 15.0:
         logger.debug(
             "M5 direction %s too weak (%.1f%% < 15%%) — treating as NO_TRADE",
@@ -252,100 +262,7 @@ def _apply_spread_filter(
     return confidence, False
 
 
-# ── SCALPING ──────────────────────────────────────────────────────────────────
-
-def generate_signal_scalping(
-    df_h1: pd.DataFrame,
-    df_m5: pd.DataFrame,
-    symbol: Symbol,
-    live_price: Optional[float] = None,
-    prefix: str = "",
-) -> Optional[TradeSignal]:
-    """Scalping signal: M5 entry in direction of H1 trend.
-
-    Rules:
-    - H1 provides trend direction (the only boss)
-    - M5 momentum must agree for entry timing
-    - Tight stops: 0.5x ATR SL, 0.8x ATR TP
-    - Lower threshold (30%) — more signals, quick in/out
-
-    Args:
-        live_price: Current market price. If provided, used as entry instead
-            of the last H1 candle close, so SL/TP reflect live conditions.
-    """
-    cfg = SETTINGS.scalping
-
-    if df_h1.empty or len(df_h1) < 200:
-        logger.info("Scalping: insufficient H1 data (%d)", len(df_h1))
-        return None
-
-    h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
-
-    logger.info("Scalping: H1=%s M5=%s (M5 conf=%.1f%% mom=%.1f)", h1_dir.value, m5_dir.value, m5_conf, m5_momentum)
-
-    # H1 must have a direction
-    if h1_dir == SignalType.NO_TRADE:
-        logger.info("Scalping: H1 NO_TRADE — no trend")
-        return None
-
-    # M5 must agree (or at least not contradict)
-    if m5_dir != SignalType.NO_TRADE and m5_dir != h1_dir:
-        logger.info("Scalping: M5 opposes H1 — blocked")
-        return None
-
-    # M5 agreement gives bonus, disagreement gives penalty
-    base_confidence = min(h1_scores.total / WEIGHTS.total * 100.0, 100.0)
-    confluence_bonus = 0.0
-    confluence_label = cfg.confluence_label
-
-    if m5_dir == h1_dir:
-        confluence_bonus += 10.0
-        confluence_label = f"{cfg.confluence_label}+m5"
-    elif m5_dir == SignalType.NO_TRADE:
-        confluence_bonus += 3.0  # M5 neutral is OK for scalping
-
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus))
-
-    # Spread filter: reduce confidence or skip signal for wide spreads
-    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
-    if skip:
-        logger.info("Scalping: skipped — spread too wide")
-        return None
-
-    if confidence < cfg.confidence_threshold:
-        logger.info("Scalping: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
-        return None
-
-    entry = round(live_price if live_price is not None else h1_close, 5)
-    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
-    sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
-    stop_loss, take_profit = _compute_stop_take(
-        h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
-        atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
-    )
-
-    return TradeSignal(
-        signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
-        symbol=symbol.value,
-        timeframe=cfg.entry_timeframe,
-        signal=h1_dir,
-        confidence=round(confidence, 2),
-        entry=entry,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        timestamp=df_h1.iloc[-1]["timestamp"],
-        features=h1_feat,
-        factor_scores=h1_scores,
-        h4_direction="n/a",
-        h1_direction=h1_dir.value,
-        m5_direction=m5_dir.value,
-        confluence=confluence_label,
-        trade_mode="scalping",
-    )
-
-
-# ── DAY TRADING ───────────────────────────────────────────────────────────────
+# ── DAY TRADING (the only supported trade mode) ─────────────────────────────
 
 def _resample_m5_to_m15(df_m5: pd.DataFrame) -> pd.DataFrame:
     """Resample M5 candle data to M15 for smoother confirmation.
@@ -406,20 +323,22 @@ def generate_signal_day_trading(
     - Threshold: 30%
     """
     cfg = SETTINGS.day_trading
+    # Per-symbol strategy profile (gold vs crypto use different factor weights)
+    weights = SETTINGS.get_signal_weights(symbol.value)
 
     if df_h1.empty or len(df_h1) < 200:
         logger.info("Day trade: insufficient H1 data (%d)", len(df_h1))
         return None
 
-    h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
+    h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1, weights=weights)
+    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5, weights=weights)
 
     # Resample M5 → M15 for confirmation (smoother than raw M5)
     df_m15 = _resample_m5_to_m15(df_m5)
     m15_dir = SignalType.NO_TRADE
     m15_scores = None
     if not df_m15.empty and len(df_m15) >= 50:
-        m15_dir, m15_scores, _, _ = _get_direction_from_df(df_m15)
+        m15_dir, m15_scores, _, _ = _get_direction_from_df(df_m15, weights=weights)
 
     logger.info(
         "Day trade: M15=%s H1=%s M5=%s (M5 conf=%.1f%%)",
@@ -446,7 +365,7 @@ def generate_signal_day_trading(
     else:
         m5_penalty = 0.0
 
-    base_confidence = min(h1_scores.total / WEIGHTS.total * 100.0, 100.0)
+    base_confidence = min(h1_scores.total / weights.total * 100.0, 100.0)
     confluence_bonus = 0.0
     confluence_label = cfg.confluence_label
 
@@ -502,120 +421,6 @@ def generate_signal_day_trading(
     )
 
 
-# ── SWING ────────────────────────────────────────────────────────────────────
-
-def generate_signal_swing(
-    df_h4: pd.DataFrame,
-    df_h1: pd.DataFrame,
-    df_m5: pd.DataFrame,
-    symbol: Symbol,
-    live_price: Optional[float] = None,
-    prefix: str = "",
-) -> Optional[TradeSignal]:
-    """Swing signal: H4+H1 alignment, M5 entry trigger.
-
-    Rules:
-    - H4 = trend direction (the boss)
-    - H1 opposition penalises confidence (heavier penalty than day trade)
-    - M5 supports entry timing
-    - Wide stops: 2x ATR SL, 3x ATR TP
-    - Threshold: 25%
-    """
-    cfg = SETTINGS.swing
-
-    if df_h4.empty or len(df_h4) < 200 or df_h1.empty or len(df_h1) < 200:
-        logger.info("Swing: insufficient data (H4=%d, H1=%d)", len(df_h4), len(df_h1))
-        return None
-
-    h4_dir, h4_scores, h4_feat, _ = _get_direction_from_df(df_h4)
-    h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1)
-    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5)
-
-    logger.info("Swing: H4=%s H1=%s M5=%s (M5 conf=%.1f%%)", h4_dir.value, h1_dir.value, m5_dir.value, m5_conf)
-
-    # H4 and H1 must both have a direction
-    if h4_dir == SignalType.NO_TRADE or h1_dir == SignalType.NO_TRADE:
-        logger.info("Swing: H4 or H1 is NO_TRADE")
-        return None
-
-    # H4 vs H1 conflict: heavy penalty instead of hard block.
-    # Swing trades need more alignment, so the penalty is larger than day trade.
-    # When they agree, H4 direction is used; when H1 opposes, H1 direction is used
-    # (H1 is the entry timeframe — more relevant for timing).
-    h4_h1_penalty = 0.0
-    if h4_dir != h1_dir:
-        h4_h1_penalty = -18.0
-        logger.info("Swing: H4=%s vs H1=%s — penalty -18%%", h4_dir.value, h1_dir.value)
-
-    signal_dir = h1_dir  # Use H1 direction (entry timing matters more)
-
-    # Confidence calculation
-    base_confidence = min(h1_scores.total / WEIGHTS.total * 100.0, 100.0)
-    confluence_bonus = 0.0
-    confluence_label = f"{cfg.confluence_label}"
-
-    # H4 alignment label
-    if h4_dir == signal_dir:
-        confluence_label = f"{confluence_label}+h4"
-    elif h4_dir != h1_dir:
-        confluence_label = f"{confluence_label}_vs_h4"
-
-    # H4 trend strength bonus (only when H4 agrees with signal direction)
-    if h4_dir == signal_dir and h4_feat.trend_strength is not None and not pd.isna(h4_feat.trend_strength):
-        h4_trend_abs = abs(h4_feat.trend_strength)
-        if h4_trend_abs > 60:
-            confluence_bonus += 10.0
-        elif h4_trend_abs > 40:
-            confluence_bonus += 5.0
-
-    # M5 check
-    if m5_dir == signal_dir:
-        confluence_bonus += 8.0
-        confluence_label = f"{confluence_label}+m5"
-    elif m5_dir != SignalType.NO_TRADE and m5_dir != signal_dir:
-        confluence_bonus -= 12.0
-        confluence_label = f"{confluence_label}_vs_m5"
-
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + h4_h1_penalty))
-
-    # Spread filter: reduce confidence or skip signal for wide spreads
-    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
-    if skip:
-        logger.info("Swing: skipped — spread too wide")
-        return None
-
-    if confidence < cfg.confidence_threshold:
-        logger.info("Swing: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
-        return None
-
-    entry = round(live_price if live_price is not None else h1_close, 5)
-    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
-    sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
-    stop_loss, take_profit = _compute_stop_take(
-        signal_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
-        atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
-    )
-
-    return TradeSignal(
-        signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
-        symbol=symbol.value,
-        timeframe="confluence",
-        signal=signal_dir,
-        confidence=round(confidence, 2),
-        entry=entry,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        timestamp=df_h1.iloc[-1]["timestamp"],
-        features=h1_feat,
-        factor_scores=h1_scores,
-        h4_direction=h4_dir.value,
-        h1_direction=h1_dir.value,
-        m5_direction=m5_dir.value,
-        confluence=confluence_label,
-        trade_mode="swing",
-    )
-
-
 # ── DISPATCHER ────────────────────────────────────────────────────────────────
 
 def generate_signal(
@@ -623,26 +428,14 @@ def generate_signal(
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     symbol: Symbol,
-    mode: Optional[TradeMode] = None,
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Generate signal based on the active trade mode.
+    """Generate a day-trading signal (the only supported mode).
 
     Args:
         live_price: Current market price. If provided, used as entry instead
             of the last candle close, so SL/TP reflect live conditions.
         prefix: Prefix for signal_id (e.g., "live_", "backtest_") to distinguish sources.
     """
-    if mode is None:
-        mode = SETTINGS.trade_mode
-
-    if mode == TradeMode.SCALPING:
-        return generate_signal_scalping(df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
-    elif mode == TradeMode.DAY_TRADING:
-        return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
-    elif mode == TradeMode.SWING:
-        return generate_signal_swing(df_h4, df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)
-    else:
-        logger.error("Unknown trade mode: %s", mode)
-        return None
+    return generate_signal_day_trading(df_h4, df_h1, df_m5, symbol, live_price=live_price, prefix=prefix)

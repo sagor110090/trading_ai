@@ -18,7 +18,7 @@ import pandas as pd
 from config.settings import SETTINGS
 from data.models import MLModelMeta
 from indicators.features import FeatureSet
-from ml.dataset import SESSION_CATEGORIES, SESSION_ENC_COL, TRADE_MODES
+from ml.dataset import SESSION_CATEGORIES, SESSION_ENC_COL
 from signals.engine import TradeSignal
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,6 @@ MIN_ENSEMBLE_AUC = 0.62
 # Model types that require an external library.  Checked once at startup
 # so that models whose library is missing are never even attempted.
 _MODEL_LIBRARY_MAP = {
-    "lightgbm": "lightgbm",
     "xgboost": "xgboost",
     "catboost": "catboost",
     "histgbrt": "sklearn.ensemble",  # HistGradientBoosting is part of sklearn
@@ -49,7 +48,7 @@ def _check_model_libraries() -> None:
             __import__(module_name)
         except (ImportError, OSError):
             # ImportError: package not installed
-            # OSError: package installed but native DLL missing (e.g. lightgbm)
+            # OSError: package installed but native DLL missing
             _UNAVAILABLE_MODEL_TYPES.add(model_type)
             logger.warning(
                 "ML library '%s' not importable — %s models will be skipped",
@@ -257,11 +256,6 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
         for cat in SESSION_CATEGORIES:
             features[f"session_{cat.lower()}"] = 1 if session == cat else 0
 
-    # Encode trade_mode with one-hot encoding
-    trade_mode = getattr(signal, "trade_mode", "") or ""
-    for mode in TRADE_MODES:
-        features[f"mode_{mode}"] = 1 if trade_mode == mode else 0
-
     # Build DataFrame with explicit column ordering and guaranteed presence.
     # Use 0.0 for any feature missing from the signal's feature dict,
     # and replace None values with their neutral defaults.
@@ -273,7 +267,6 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
         "spread": 0.0, "atr_ratio": 1.0,
         "session_asian": 0, "session_london": 0, "session_new_york": 0,
         "session_enc": -1,
-        "mode_scalping": 0, "mode_day_trading": 0, "mode_swing": 0,
     }
 
     if feature_cols:
