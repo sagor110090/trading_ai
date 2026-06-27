@@ -33,6 +33,13 @@ from ml.smote import apply_smote
 
 logger = logging.getLogger(__name__)
 
+# Surface training-progress INFO records (per-model "Training…", metrics,
+# feature selection) even when the root logger is at WARNING — e.g. when run
+# via backtest_historical.py. Otherwise a long Optuna tuning or model fit step
+# produces no output and looks like a freeze.
+if logger.level == logging.NOTSET:
+    logger.setLevel(logging.INFO)
+
 ML_CONFIG = SETTINGS.ml
 MODEL_DIR = ML_CONFIG.model_dir
 

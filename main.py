@@ -433,9 +433,9 @@ def _apply_ml_filter(trade_signal: TradeSignal, stats: dict) -> tuple[bool, floa
     predictions are logged but do NOT gate trades (the model is untrusted).
 
     Returns:
-        (should_trade, size_multiplier) — should_trade is False if blocked,
-        size_multiplier scales the position size (1.0 when approved or when ML
-        is disabled/untrusted, <1.0 in the soft zone).
+        (should_trade, size_multiplier) — should_trade is False if blocked.
+        size_multiplier is always 1.0 now (the soft-zone size scaling was
+        removed); it is kept in the signature for callers that unpack it.
     """
     should_trade = True
     size_multiplier = 1.0
@@ -448,7 +448,6 @@ def _apply_ml_filter(trade_signal: TradeSignal, stats: dict) -> tuple[bool, floa
 
     stats["ml_prediction"] = prediction
     threshold = SETTINGS.get_prediction_threshold(trade_signal.symbol)
-    hard_block = SETTINGS.ml.hard_block_threshold
 
     # If the model was trained on too few verified signals, log the prediction
     # but do NOT gate the trade — the model is not trustworthy yet.
@@ -461,16 +460,14 @@ def _apply_ml_filter(trade_signal: TradeSignal, stats: dict) -> tuple[bool, floa
         display_ml_prediction(prediction, threshold, zone="untrusted")
         return should_trade, size_multiplier
 
-    if prediction.probability < hard_block:
+    # Single ML cutoff: take the trade only when the model's WIN probability
+    # meets the per-symbol threshold (XAUUSD 0.45 / BTCUSD 0.40). Below it the
+    # trade is blocked outright — no soft-zone scaling.
+    if prediction.probability < threshold:
         should_trade = False
         stats["ml_blocked"] = True
-        stats["ml_block_reason"] = "hard_block"
-        display_ml_prediction(prediction, threshold, zone="hard_block")
-    elif prediction.probability < threshold:
-        size_multiplier = prediction.probability / threshold
-        stats["ml_confidence_multiplier"] = round(size_multiplier, 2)
-        stats["ml_soft_block"] = True
-        display_ml_prediction(prediction, threshold, zone="soft")
+        stats["ml_block_reason"] = "below_threshold"
+        display_ml_prediction(prediction, threshold, blocked=True)
     else:
         stats["ml_approved"] = True
         display_ml_prediction(prediction, threshold, zone="approved")

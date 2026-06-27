@@ -125,28 +125,27 @@ def display_ml_prediction(prediction: Prediction, threshold: float, blocked: boo
     Args:
         prediction: The ML prediction result.
         threshold: The ML probability threshold for this symbol.
-        blocked: Whether the trade is hard-blocked (prob < hard_block_threshold).
-        zone: One of "hard_block", "soft", or "approved".
+        blocked: True if the trade is blocked (prob < threshold).
+        zone: "approved" when the trade is taken, "untrusted" when ML is logged
+            but not gating (few verified signals).
     """
     # ML-adjusted confidence = rule confidence × ML probability
     ml_adj_conf = prediction.confidence
 
-    if blocked or zone == "hard_block":
+    if blocked:
         content = (
             f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
             f"ML prob [bold red]{prediction.probability:.1%}[/]  →  "
             f"[dim]adj. confidence [bold red]{ml_adj_conf:.1f}%[/]\n"
-            f"  [bold red]❌ HARD BLOCKED[/]  below {threshold:.0%} threshold (prob < 20%)"
+            f"  [bold red]❌ BLOCKED[/]  below {threshold:.0%} threshold"
         )
         console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="red", padding=(0, 2)))
-    elif zone == "soft":
-        confidence_multiplier = prediction.probability / threshold
+    elif zone == "untrusted":
         content = (
             f"  [dim]{prediction.model_type}_v{prediction.model_version}[/]  ·  "
-            f"ML prob [bold yellow]{prediction.probability:.1%}[/]  →  "
-            f"[dim]adj. confidence [bold yellow]{ml_adj_conf:.1f}%[/]\n"
-            f"  [bold yellow]⚠ SOFT ZONE[/]  {prediction.probability:.1%} < {threshold:.0%} threshold  ·  "
-            f"confidence × {confidence_multiplier:.0%}"
+            f"ML prob [yellow]{prediction.probability:.1%}[/]  →  "
+            f"[dim]adj. confidence {ml_adj_conf:.1f}%[/]\n"
+            f"  [yellow]⏭ NOT GATING[/]  too few verified signals — trade taken on rules only"
         )
         console.print(Panel(content, title="[bold]ML Prediction[/]", border_style="yellow", padding=(0, 2)))
     else:

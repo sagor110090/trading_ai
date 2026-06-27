@@ -20,11 +20,36 @@ from config.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
 
+# Ensure this logger's INFO records reach the handlers even when the root
+# logger is configured at WARNING (e.g. by backtest_historical.py). Without
+# this, Optuna tuning and the per-trial heartbeat are completely silent and
+# a long run looks indistinguishable from a freeze.
+if logger.level == logging.NOTSET:
+    logger.setLevel(logging.INFO)
+
 ML_CONFIG = SETTINGS.ml
 MODEL_DIR = ML_CONFIG.model_dir
 
 # Default number of Optuna trials per model type
 DEFAULT_N_TRIALS = 50
+
+
+def _optuna_timeout() -> Optional[float]:
+    """Optional wall-clock cap for an Optuna study, from ML_OPTUNA_TIMEOUT (sec).
+
+    0 / unset / invalid → no cap (relies on n_trials). A positive value lets
+    tuning terminate even if individual trials are unexpectedly slow, so the
+    pipeline never hangs indefinitely.
+    """
+    raw = os.getenv("ML_OPTUNA_TIMEOUT", "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+        return val if val > 0 else None
+    except ValueError:
+        logger.warning("Invalid ML_OPTUNA_TIMEOUT=%r, ignoring", raw)
+        return None
 
 
 def _xgboost_search_space(trial) -> dict:
@@ -160,7 +185,43 @@ def tune_hyperparams(
             return 0.5  # Worst possible AUC (random classifier)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    # Per-trial heartbeat so tuning is never silent. Without this a long
+    # CatBoost / HistGBRT search produces no output and looks frozen.
+    def _heartbeat(study, trial):
+        try:
+            completed = [t for t in study.trials if t.state.name == "COMPLETE"]
+            best_val = None
+            best_num = -1
+            try:
+                best_val = study.best_value
+                best_num = study.best_trial.number
+            except ValueError:
+                pass
+            logger.info(
+                "Optuna %s trial %d/%d: value=%s best=%s (trial %d)",
+                model_type,
+                trial.number + 1, n_trials,
+                f"{trial.value:.4f}" if trial.value is not None else "n/a",
+                f"{best_val:.4f}" if best_val is not None else "n/a",
+                best_num,
+            )
+        except Exception:
+            pass
+
+    timeout = _optuna_timeout()
+    logger.info(
+        "Optuna tuning %s: up to %d trials%s",
+        model_type, n_trials,
+        f" (timeout={timeout:.0f}s)" if timeout else "",
+    )
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        timeout=timeout,
+        show_progress_bar=False,
+        callbacks=[_heartbeat],
+    )
 
     best_params = study.best_params
     best_auc = study.best_value
