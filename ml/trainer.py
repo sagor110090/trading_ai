@@ -54,6 +54,7 @@ class TrainingResult:
     metrics: ModelMetrics
     filepath: str
     version: int
+    feature_columns: list = None
 
 
 def _ensure_model_dir() -> None:
@@ -300,13 +301,17 @@ def train_models(
         version = _get_next_version(symbol, tf_label, model_type)
 
         # Step 3: Probability calibration (Platt scaling)
+        # IMPORTANT: align validation set to the model's selected features.
+        # After feature selection the model may expect fewer columns than X_vl,
+        # so predict_proba would raise a feature_names mismatch.
+        X_vl_aligned = X_vl[selected_cols] if selected_cols else X_vl
         calibrated_model = None
         if ML_CONFIG.use_calibration:
             try:
                 from ml.calibration import calibrate_model
 
                 calibrated_model = calibrate_model(
-                    model, X_vl, y_vl, model_type, symbol, tf_label, version,
+                    model, X_vl_aligned, y_vl, model_type, symbol, tf_label, version,
                 )
             except Exception as e:
                 logger.warning("Calibration failed for %s: %s", model_type, e)
@@ -314,8 +319,8 @@ def train_models(
         # Use calibrated model for final metrics if available
         if calibrated_model is not None:
             try:
-                y_pred = calibrated_model.predict(X_vl)
-                y_proba = calibrated_model.predict_proba(X_vl)[:, 1]
+                y_pred = calibrated_model.predict(X_vl_aligned)
+                y_proba = calibrated_model.predict_proba(X_vl_aligned)[:, 1]
                 metrics = _compute_metrics(y_vl, y_pred, y_proba)
                 logger.info(
                     "%s calibrated metrics: acc=%.4f prec=%.4f rec=%.4f f1=%.4f auc=%.4f",
@@ -363,6 +368,7 @@ def train_models(
             metrics=metrics,
             filepath=filepath,
             version=version,
+            feature_columns=selected_cols,
         ))
 
         logger.info(

@@ -421,8 +421,12 @@ def run_walk_forward(
             try:
                 from ml.trainer import _compute_metrics
                 model_obj = joblib.load(results[0].filepath)
-                y_pred_h = model_obj.predict(X_test_honest)
-                y_proba_h = model_obj.predict_proba(X_test_honest)[:, 1]
+                # Align honest test set to the model's selected features
+                # (feature selection may have dropped some columns).
+                feat_cols = getattr(results[0], "feature_columns", None)
+                X_honest = X_test_honest[feat_cols] if feat_cols else X_test_honest
+                y_pred_h = model_obj.predict(X_honest)
+                y_proba_h = model_obj.predict_proba(X_honest)[:, 1]
                 metrics = _compute_metrics(y_test_honest, y_pred_h, y_proba_h)
             except Exception as e:
                 logger.warning("Honest metrics recompute failed for fold %d: %s",
