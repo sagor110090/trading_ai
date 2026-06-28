@@ -1,6 +1,17 @@
 """Multi-timeframe confluence signal engine (day trading).
 
-Day trade: M5 entry + H1 trend + M15 confirmation (resampled from M5). Medium stops. Close same day.
+Decision hierarchy (no lower layer overrides a higher one):
+
+    H4  → primary market trend (bias + EMA200/distance filter) → allowed direction
+    H1  → trend confirmation (must not oppose the H4 trend)
+    M15 → pullback setup quality (confidence modifier)
+    M5  → momentum entry timing (confidence modifier)
+    factor scores (trend-heavy weights) + modifiers → confidence
+    per-symbol threshold (BTC 45 / XAU 40) → trade / no-trade
+    _compute_stop_take (unchanged) → SL/TP
+
+MACD never sets direction. Counter-trend trades are rejected by the EMA200 and
+distance filters in :mod:`signals.bias`. Day trade, medium stops, close same day.
 """
 
 import logging
@@ -14,7 +25,11 @@ from config.settings import (
     SETTINGS, SignalType, SignalWeights, Symbol, Timeframe,
 )
 from indicators.features import FeatureSet, compute_all_features, extract_feature_set_with_lags
-from signals.scoring import FactorScores, compute_signal_scores
+from signals.bias import (
+    DecisionLog, MarketBias, MarketRegime, decide_direction, get_market_bias,
+    classify_setup, momentum_confirms,
+)
+from signals.scoring import FactorScores, compute_factor_scores, compute_signal_scores
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +70,13 @@ class TradeSignal:
 def _get_direction_from_df(
     df: pd.DataFrame, weights: SignalWeights | None = None,
 ) -> tuple[SignalType, FactorScores, FeatureSet, float]:
-    """Compute direction, scores, and features from the latest candle."""
+    """Compute direction, scores, and features from the latest candle.
+
+    Kept for backward compatibility; direction now comes from the bias pipeline
+    via ``compute_signal_scores`` → ``bias.decide_direction``. The multi-TF
+    engine below calls ``decide_direction`` / ``compute_factor_scores`` directly
+    so it can pass ``strict`` and an explicit close per timeframe.
+    """
     df_features = compute_all_features(df)
     idx = len(df_features) - 1
     row = df_features.iloc[idx]
@@ -83,6 +104,24 @@ def _get_direction_from_df(
     )
 
     return direction, scores, features, row["close"]
+
+
+def _extract_features(df: pd.DataFrame) -> tuple[Optional[FeatureSet], Optional[float]]:
+    """Compute the latest-bar FeatureSet + close from a candle DataFrame.
+
+    Returns (None, None) when there is no data or EMA200 isn't available yet.
+    """
+    if df is None or df.empty:
+        return None, None
+    df_features = compute_all_features(df)
+    if df_features.empty:
+        return None, None
+    idx = len(df_features) - 1
+    row = df_features.iloc[idx]
+    if pd.isna(row.get("ema200")):
+        return None, None
+    features = extract_feature_set_with_lags(df_features, idx)
+    return features, float(row["close"])
 
 
 def _pips_to_price(pips: float, symbol: Symbol, entry: float) -> float:
@@ -310,78 +349,127 @@ def generate_signal_day_trading(
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Day trading signal: M5 entry in H1 trend direction, M15 confirmation.
+    """Day trading signal: H4 trend → H1 confirmation → M15 setup → M5 entry.
 
-    Timeframes: H1 = trend direction, M15 = confirmation, M5 = entry timing.
-    M15 is resampled from M5 data (no separate candle fetch needed).
+    Decision hierarchy — no lower layer overrides a higher one:
 
-    Rules:
-    - H1 provides trend direction (the boss)
-    - M15 opposition penalises confidence (smoother than M5, avoids noise)
-    - M5 momentum must agree for entry timing
-    - Medium stops: per-symbol SL/TP multipliers
-    - Threshold: 30%
+    - H4  : primary market trend (bias + EMA200/distance filter) → allowed dir
+    - H1  : trend confirmation (must not oppose H4 when H4 is trending)
+    - M15 : pullback setup quality (confidence modifier)
+    - M5  : momentum entry timing (confidence modifier)
+    - factor scores (trend-heavy weights) + modifiers → confidence
+    - per-symbol threshold (BTC 45 / XAU 40) → trade / no-trade
+
+    MACD never sets direction. Counter-trend trades are rejected by the EMA200
+    and distance filters in :mod:`signals.bias`. SL/TP math is unchanged.
     """
     cfg = SETTINGS.day_trading
     # Per-symbol strategy profile (gold vs crypto use different factor weights)
     weights = SETTINGS.get_signal_weights(symbol.value)
 
-    if df_h1.empty or len(df_h1) < 200:
-        logger.info("Day trade: insufficient H1 data (%d)", len(df_h1))
+    if df_h4 is None or df_h4.empty or len(df_h4) < 200:
+        logger.info("Day trade: insufficient H4 data (%s)", len(df_h4) if df_h4 is not None else 0)
+        return None
+    if df_h1 is None or df_h1.empty or len(df_h1) < 200:
+        logger.info("Day trade: insufficient H1 data (%s)", len(df_h1) if df_h1 is not None else 0)
         return None
 
-    h1_dir, h1_scores, h1_feat, h1_close = _get_direction_from_df(df_h1, weights=weights)
-    m5_dir, m5_conf, m5_momentum = _get_m5_direction(df_m5, weights=weights)
-
-    # Resample M5 → M15 for confirmation (smoother than raw M5)
+    # ── Features per timeframe ────────────────────────────────────────────
+    h4_feat, h4_close = _extract_features(df_h4)
+    h1_feat, h1_close = _extract_features(df_h1)
+    m5_feat, _m5_close = _extract_features(df_m5)
     df_m15 = _resample_m5_to_m15(df_m5)
-    m15_dir = SignalType.NO_TRADE
-    m15_scores = None
-    if not df_m15.empty and len(df_m15) >= 50:
-        m15_dir, m15_scores, _, _ = _get_direction_from_df(df_m15, weights=weights)
+    m15_feat, _m15_close = _extract_features(df_m15) if (df_m15 is not None and not df_m15.empty) else (None, None)
 
-    logger.info(
-        "Day trade: M15=%s H1=%s M5=%s (M5 conf=%.1f%%)",
-        m15_dir.value, h1_dir.value, m5_dir.value, m5_conf,
-    )
-
-    # H1 must have a direction
-    if h1_dir == SignalType.NO_TRADE:
-        logger.info("Day trade: H1 NO_TRADE")
+    if h4_feat is None:
+        logger.info("Day trade: H4 EMA200 not ready")
+        return None
+    if h1_feat is None:
+        logger.info("Day trade: H1 EMA200 not ready")
         return None
 
-    # M15 confirmation penalty/bonus (replaces H4 role)
-    # M15 is smoother than M5, so it provides a more reliable mid-term direction
-    m15_penalty = 0.0
-    m15_opposes = False
-    if m15_dir != SignalType.NO_TRADE and m15_dir != h1_dir:
-        m15_penalty = -10.0
-        m15_opposes = True
-        logger.info("Day trade: M15=%s opposes H1=%s — penalty -10%%", m15_dir.value, h1_dir.value)
+    # ── Step 1-6: primary direction from H4 (strict trend filter) ──────────
+    primary, h4_log = decide_direction(h4_feat, strict=True, close=h4_close)
 
-    # M5 must agree or be neutral
-    if m5_dir != SignalType.NO_TRADE and m5_dir != h1_dir:
-        m5_penalty = -8.0
-    else:
-        m5_penalty = 0.0
+    if primary == SignalType.NO_TRADE:
+        # H4 ranging or filtered out → let H1 lead (raw bias, no filter)
+        if h1_feat is not None:
+            primary, h4_log = decide_direction(h1_feat, strict=False, close=h1_close)
+            h4_log.reason = "H4 NO_TRADE → H1 raw bias fallback"
+        if primary == SignalType.NO_TRADE:
+            logger.info("Day trade: rejected — no primary direction.%s", h4_log.format_rejected(SignalType.NO_TRADE))
+            return None
 
-    base_confidence = min(h1_scores.total / weights.total * 100.0, 100.0)
+    # ── H1 confirmation: must not oppose the primary trend ─────────────────
+    h1_bias = get_market_bias(h1_feat.ema20, h1_feat.ema50, h1_feat.ema200)
+    h4_regime = h4_log.regime
+    opposes = (
+        (primary == SignalType.BUY and h1_bias == MarketBias.SELL_BIAS)
+        or (primary == SignalType.SELL and h1_bias == MarketBias.BUY_BIAS)
+    )
+    if opposes and h4_regime != MarketRegime.RANGING:
+        logger.info(
+            "Day trade: rejected — H1 %s opposes H4 trend %s.%s",
+            h1_bias.value, primary.value, h4_log.format_rejected(primary),
+        )
+        return None
+
+    # ── Setup (M15 pullback) + entry timing (M5 momentum) ──────────────────
+    setup = "neutral"
+    if m15_feat is not None and m15_feat.ema200 is not None and m15_feat.dist_ema200 is not None:
+        m15_close = m15_feat.ema200 + m15_feat.dist_ema200
+        setup = classify_setup(m15_close, m15_feat.ema20, m15_feat.atr14, primary)
+
+    entry_ok = momentum_confirms(
+        m5_feat.macd_line if m5_feat else None,
+        m5_feat.macd_signal if m5_feat else None,
+        m5_feat.macd_histogram if m5_feat else None,
+        primary,
+    ) if m5_feat is not None else False
+
+    # ── Confidence: trend-heavy factor scores + confluence modifiers ──────
+    h1_scores = compute_factor_scores(
+        primary,
+        ema20=h1_feat.ema20 or 0,
+        ema50=h1_feat.ema50 or 0,
+        ema200=h1_feat.ema200 or 0,
+        close=h1_close or (h1_feat.ema20 or 0),
+        rsi=h1_feat.rsi14 or 50,
+        macd_line=h1_feat.macd_line or 0,
+        macd_signal=h1_feat.macd_signal or 0,
+        macd_histogram=h1_feat.macd_histogram or 0,
+        atr=h1_feat.atr14 or 0,
+        candle_body_pct=h1_feat.candle_body_pct or 0,
+        upper_wick_pct=h1_feat.upper_wick_pct or 0,
+        lower_wick_pct=h1_feat.lower_wick_pct or 0,
+        momentum_score=h1_feat.momentum_score or 0,
+        trend_strength=h1_feat.trend_strength or 0,
+        weights=weights,
+    )
+    base_confidence = min(h1_scores.total / (weights.total or 100.0) * 100.0, 100.0)
+
     confluence_bonus = 0.0
-    confluence_label = cfg.confluence_label
-
-    # M15 alignment bonus or opposition label
-    if m15_dir == h1_dir and m15_dir != SignalType.NO_TRADE:
+    label_parts = [cfg.confluence_label, f"trend_h4={primary.value}"]
+    if h1_bias in (MarketBias.BUY_BIAS, MarketBias.SELL_BIAS):
+        same = (primary == SignalType.BUY and h1_bias == MarketBias.BUY_BIAS) or (
+            primary == SignalType.SELL and h1_bias == MarketBias.SELL_BIAS)
+        if same:
+            confluence_bonus += 4.0
+            label_parts.append("conf_h1")
+    if setup == "pullback":
         confluence_bonus += 8.0
-        confluence_label = f"{cfg.confluence_label}+m15"
-    elif m15_opposes:
-        confluence_label = f"{cfg.confluence_label}_vs_m15"
-
-    # M5 alignment bonus
-    if m5_dir == h1_dir:
+        label_parts.append("pullback")
+    elif setup == "extension":
+        confluence_bonus -= 4.0
+        label_parts.append("extension")
+    if entry_ok:
         confluence_bonus += 6.0
-        confluence_label = f"{confluence_label}+m5"
+        label_parts.append("entry_ok")
+    else:
+        confluence_bonus -= 6.0
+        label_parts.append("entry_no")
 
-    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus + m15_penalty + m5_penalty))
+    confidence = max(0.0, min(100.0, base_confidence + confluence_bonus))
 
     # Spread filter: reduce confidence or skip signal for wide spreads
     confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
@@ -389,23 +477,34 @@ def generate_signal_day_trading(
         logger.info("Day trade: skipped — spread too wide")
         return None
 
-    if confidence < cfg.confidence_threshold:
-        logger.info("Day trade: confidence %.1f < threshold %.1f", confidence, cfg.confidence_threshold)
+    # Per-symbol confidence threshold (BTC 45 / XAU 40).
+    threshold = SETTINGS.get_signal_thresholds(symbol.value).buy_threshold
+    if confidence < threshold:
+        logger.info(
+            "Day trade: confidence %.1f < threshold %.1f.%s",
+            confidence, threshold, h4_log.format_rejected(primary),
+        )
         return None
 
-    entry = round(live_price if live_price is not None else h1_close, 5)
-    # Use per-symbol SL/TP multipliers if set, otherwise use trade mode defaults
+    # ── Entry + SL/TP (unchanged math, primary direction) ──────────────────
+    entry = round(live_price if live_price is not None else (h1_close or 0.0), 5)
     sl_mult, tp_mult = SETTINGS.get_sl_tp_multipliers(symbol.value)
     stop_loss, take_profit = _compute_stop_take(
-        h1_dir, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
+        primary, entry, h1_feat.atr14, symbol, sl_mult, tp_mult,
         atr_ratio=h1_feat.atr_ratio, symbol_name=symbol.value,
+    )
+
+    confluence_label = "+".join(label_parts)
+    logger.info(
+        "Day trade %s %s accepted.%s",
+        symbol.value, primary.value, h4_log.format_accepted(confidence),
     )
 
     return TradeSignal(
         signal_id=f"{prefix}{uuid.uuid4().hex[:16]}",
         symbol=symbol.value,
         timeframe=cfg.entry_timeframe,
-        signal=h1_dir,
+        signal=primary,
         confidence=round(confidence, 2),
         entry=entry,
         stop_loss=stop_loss,
@@ -413,9 +512,9 @@ def generate_signal_day_trading(
         timestamp=df_h1.iloc[-1]["timestamp"],
         features=h1_feat,
         factor_scores=h1_scores,
-        h4_direction=m15_dir.value,  # M15 confirmation stored in h4_direction field
-        h1_direction=h1_dir.value,
-        m5_direction=m5_dir.value,
+        h4_direction=h4_log.bias.value,   # H4 bias stored in h4_direction field
+        h1_direction=h1_bias.value,
+        m5_direction=("confirms" if entry_ok else "no-confirmation"),
         confluence=confluence_label,
         trade_mode="day_trading",
     )

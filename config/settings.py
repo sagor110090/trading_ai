@@ -111,18 +111,21 @@ class SignalThresholds:
 # Per-symbol strategy profiles
 #
 # Gold (XAUUSD) and Bitcoin (BTCUSD) have very different volatility and
-# micro-structure, so they are scored with different factor weights:
-#   - Gold respects technical levels / RSI mean-reversion  -> structure + RSI heavy
+# micro-structure, so they are scored with different factor weights. Both
+# profiles are now TREND-DOMINANT (ema_trend ≈ 36-40 of 100) so that momentum
+# (MACD + momentum) can never overpower the trend — this is what prevents the
+# counter-trend trades the bias/regime pipeline is designed to block:
+#   - Gold respects technical levels / RSI mean-reversion  -> keeps higher structure + RSI
 #   - Crypto trends hard but is noisy / fakeout-prone      -> trend + momentum heavy
 # Weights always sum to 100. These are defaults; every factor can be overridden
 # individually via env vars  SYMBOL_WEIGHT_<SYMBOL>_<FACTOR>  (see load_settings).
 # ---------------------------------------------------------------------------
 _SYMBOL_WEIGHT_DEFAULTS: dict[str, SignalWeights] = {
     "XAUUSD": SignalWeights(
-        ema_trend=28.0, rsi=18.0, macd=18.0, atr=10.0, structure=16.0, momentum=10.0,
+        ema_trend=36.0, rsi=14.0, macd=12.0, atr=8.0, structure=20.0, momentum=10.0,
     ),
     "BTCUSD": SignalWeights(
-        ema_trend=34.0, rsi=10.0, macd=22.0, atr=8.0, structure=10.0, momentum=16.0,
+        ema_trend=40.0, rsi=10.0, macd=10.0, atr=5.0, structure=20.0, momentum=15.0,
     ),
 }
 

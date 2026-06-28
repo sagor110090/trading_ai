@@ -101,6 +101,10 @@ def _setup_logging() -> None:
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
     logging.getLogger(__name__).setLevel(logging.DEBUG)
+    # Surface the Step-12 signal decision log (bias/regime/allowed/decision)
+    # from the signal engine, which runs at INFO while the root is WARNING.
+    for mod in ("signals.engine", "signals.bias"):
+        logging.getLogger(mod).setLevel(logging.INFO)
 
 
 def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:

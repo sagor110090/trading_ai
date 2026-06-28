@@ -29,6 +29,10 @@ _SYMBOL_MAP: dict[Symbol, str] = {
     Symbol.BTCUSD: "BTCUSD",
 }
 
+# Suffixes tried when the base symbol name isn't found. "m" first because
+# some brokers (e.g. Exness) use it as the standard suffix (BTCUSDm, XAGUSDm).
+_SYMBOL_SUFFIXES: tuple[str, ...] = ("m", ".i", ".raw", ".pro", ".ecn", ".micro", ".mini")
+
 
 class MT5Client:
     """MetaTrader 5 client for market data and trading."""
@@ -125,6 +129,14 @@ class MT5Client:
                             return False
                     logger.info("MT5 initialized via terminal")
 
+                # Wait for the terminal to actually load its symbol database.
+                # On a cold boot, account_info() can succeed before symbols_get()
+                # returns anything, after which every symbol lookup fails with
+                # "Available symbols: []". This is the real readiness signal.
+                # Non-fatal: if it still isn't ready, fetch_candles() will
+                # force a reconnect and retry on each cycle.
+                self._wait_for_symbols(timeout=30.0)
+
                 self._connected = True
                 logger.info("Connected to MetaTrader 5")
                 return True
@@ -148,6 +160,65 @@ class MT5Client:
         if not self._connected:
             if not self.connect():
                 raise ConnectionError("Cannot connect to MetaTrader 5")
+
+    def _wait_for_symbols(self, timeout: float = 30.0, poll: float = 2.0) -> int:
+        """Poll until MT5 exposes its symbol database.
+
+        `mt5.initialize()` + `account_info()` can succeed before the
+        terminal has finished loading the server's symbol list, after which
+        `symbols_get()` returns an empty tuple and every symbol lookup fails
+        with "Available symbols: []". This polls until at least one symbol
+        appears (or the timeout elapses). Returns the symbol count seen.
+        """
+        deadline = time.time() + timeout
+        count = 0
+        while time.time() < deadline:
+            symbols = self._mt5.symbols_get()
+            count = len(symbols) if symbols else 0
+            if count > 0:
+                logger.info("MT5 symbol database ready: %d symbols", count)
+                return count
+            logger.info("Waiting for MT5 symbol database to load...")
+            time.sleep(poll)
+        logger.warning(
+            "MT5 symbol database still empty after %.0fs — terminal may not be fully connected",
+            timeout,
+        )
+        return count
+
+    def _resolve_symbol(self, mt5_symbol: str):
+        """Find symbol_info for mt5_symbol, trying common broker suffixes and
+        a fuzzy match against the available symbol list.
+
+        Returns (symbol_info, resolved_name, attempted_names).
+        """
+        attempted = [mt5_symbol]
+        symbol_info = self._mt5.symbol_info(mt5_symbol)
+        if not symbol_info:
+            for suffix in _SYMBOL_SUFFIXES:
+                alt_symbol = f"{mt5_symbol}{suffix}"
+                info = self._mt5.symbol_info(alt_symbol)
+                if info:
+                    logger.info("Symbol '%s' found as '%s' in MT5", mt5_symbol, alt_symbol)
+                    symbol_info = info
+                    mt5_symbol = alt_symbol
+                    break
+                attempted.append(alt_symbol)
+
+        if not symbol_info:
+            available = self._get_available_symbols()
+            for avail in (available or []):
+                a = avail.replace(".", "")
+                b = mt5_symbol.replace(".", "")
+                if b in a or a in b:
+                    info = self._mt5.symbol_info(avail)
+                    if info:
+                        logger.info("Symbol '%s' matched to '%s' in MT5", mt5_symbol, avail)
+                        symbol_info = info
+                        mt5_symbol = avail
+                        break
+
+        return symbol_info, mt5_symbol, attempted
 
     def fetch_candles(
         self,
@@ -178,34 +249,29 @@ class MT5Client:
         if mt5_tf is None:
             raise ValueError(f"MT5 module missing timeframe constant {mt5_tf_name}")
 
-        # Check if symbol exists in MT5 (try common broker suffixes if not found)
-        # Try "m" suffix first for brokers that use it as standard (e.g., BTCUSDm, XAGUSDm)
-        attempted = [mt5_symbol]
-        symbol_info = self._mt5.symbol_info(mt5_symbol)
-        if not symbol_info:
-            for suffix in ["m", ".i", ".raw", ".pro", ".ecn", ".micro", ".mini"]:
-                alt_symbol = f"{mt5_symbol}{suffix}"
-                info = self._mt5.symbol_info(alt_symbol)
-                if info:
-                    logger.info("Symbol '%s' found as '%s' in MT5", mt5_symbol, alt_symbol)
-                    symbol_info = info
-                    mt5_symbol = alt_symbol
-                    break
-                attempted.append(alt_symbol)
+        # Resolve the MT5 symbol (broker may use suffixes like BTCUSDm).
+        symbol_info, mt5_symbol, attempted = self._resolve_symbol(mt5_symbol)
+
+        # If nothing resolved AND the broker's symbol list is empty, the
+        # terminal most likely hasn't finished loading its symbol database
+        # (common on cold boot) or the connection dropped mid-session.
+        # _ensure_connected() only connects once, so force a fresh connect
+        # and retry once — this is what lets the loop self-heal each cycle
+        # instead of failing BTCUSD for the whole session.
+        if not symbol_info and not self._get_available_symbols():
+            logger.warning(
+                "MT5 symbol database empty — forcing reconnect before retrying '%s'",
+                mt5_symbol,
+            )
+            self._connected = False
+            try:
+                if self.connect():
+                    symbol_info, mt5_symbol, attempted = self._resolve_symbol(mt5_symbol)
+            except Exception as e:
+                logger.error("Reconnect attempt failed: %s", e)
 
         if not symbol_info:
             available = self._get_available_symbols()
-            for avail in (available or []):
-                if mt5_symbol.replace(".", "") in avail.replace(".", "") or avail.replace(".", "") in mt5_symbol.replace(".", ""):
-                    info = self._mt5.symbol_info(avail)
-                    if info:
-                        logger.info("Symbol '%s' matched to '%s' in MT5", mt5_symbol, avail)
-                        symbol_info = info
-                        mt5_symbol = avail
-                        break
-
-        if not symbol_info:
-            available = available if 'available' in dir() else self._get_available_symbols()
             logger.error("Symbol '%s' not found in MT5 (tried: %s). Available symbols: %s",
                         mt5_symbol, ", ".join(set(attempted)), available[:20] if available else "[]")
             return pd.DataFrame()
