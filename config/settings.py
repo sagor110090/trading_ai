@@ -304,6 +304,10 @@ class Settings:
     # E.g. {"XAUUSD": 30.0} means gold SL never exceeds $30 from entry.
     max_sl_distance: dict = field(default_factory=lambda: {})
     max_tp_distance: dict = field(default_factory=lambda: {})
+    # Require M5 momentum to confirm the trade direction as a HARD gate. When
+    # True, signals whose M5 MACD does not confirm the trend direction are
+    # rejected — filters fakeout entries. Env: SIGNAL_REQUIRE_ENTRY_CONFIRM.
+    require_entry_confirmation: bool = True
 
     def get_trade_size(self, symbol: str) -> float:
         """Get position size for a symbol. Falls back to DEFAULT."""
@@ -448,6 +452,8 @@ def load_settings() -> Settings:
     # Position timeout settings
     position_timeout_enabled = os.getenv("POSITION_TIMEOUT_ENABLED", "true").lower() == "true"
     position_timeout_minutes = int(os.getenv("POSITION_TIMEOUT_MINUTES", "0"))
+    # Hard gate: reject signals whose M5 momentum does not confirm direction.
+    require_entry_confirmation = os.getenv("SIGNAL_REQUIRE_ENTRY_CONFIRM", "true").lower() == "true"
 
     # Read all TRADE_SIZE_<SYMBOL> from env
     trade_sizes = {"DEFAULT": float(os.getenv("TRADE_SIZE_DEFAULT", "0.01"))}
@@ -609,6 +615,7 @@ def load_settings() -> Settings:
         auto_trade=auto_trade,
         position_timeout_enabled=position_timeout_enabled,
         position_timeout_minutes=position_timeout_minutes,
+        require_entry_confirmation=require_entry_confirmation,
         trade_sizes=trade_sizes,
         sl_multipliers=sl_multipliers,
         tp_multipliers=tp_multipliers,

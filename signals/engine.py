@@ -427,6 +427,17 @@ def generate_signal_day_trading(
         primary,
     ) if m5_feat is not None else False
 
+    # Hard gate: reject fakeout entries — M5 momentum must confirm the trend
+    # direction. Toggle via SIGNAL_REQUIRE_ENTRY_CONFIRM (default true). When
+    # off, entry_ok falls back to the soft ±6 confidence modifier below.
+    if SETTINGS.require_entry_confirmation and not entry_ok:
+        logger.info(
+            "Day trade %s %s rejected — M5 momentum does not confirm direction.%s",
+            symbol.value, primary.value, h4_log.format_rejected(primary),
+        )
+        h4_log.reason = "M5 momentum does not confirm trend direction"
+        return None
+
     # ── Confidence: trend-heavy factor scores + confluence modifiers ──────
     h1_scores = compute_factor_scores(
         primary,
