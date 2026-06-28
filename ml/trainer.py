@@ -358,12 +358,15 @@ def train_models(
                 f1=metrics.f1 if not np.isnan(metrics.f1) else 0.0,
                 roc_auc=metrics.roc_auc if not np.isnan(metrics.roc_auc) else 0.0,
             )
+            # Store the bare filename (not the absolute path) so the DB row is
+            # portable across machines/OSes — the predictor resolves it against
+            # the per-machine MODEL_DIR at load time.
             _store_model_meta(
                 model_type=model_type,
                 symbol=symbol,
                 timeframe=tf_label,
                 version=version,
-                filepath=filepath,
+                filepath=filename,
                 metrics=safe_metrics,
                 train_signal_count=train_signal_count,
             )

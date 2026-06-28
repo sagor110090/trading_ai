@@ -50,16 +50,13 @@ data/
 *.pickle
 *.feather
 *.json
-*.joblib
 
 # Logs
 *.log
 logs/
 
 # Database
-*.db
-*.sqlite
-*.sqlite3
+# (SQLite DB files are intentionally tracked — see trading_ai.db)
 
 # OS files
 .DS_Store
@@ -77,7 +74,7 @@ htmlcov/
 
 # ML training artifacts
 catboost_info/
-trading_ai/ml/models/
+# (ML models in trading_ai/ml/models/ are intentionally tracked)
 
 # MyPy
 .mypy_cache/

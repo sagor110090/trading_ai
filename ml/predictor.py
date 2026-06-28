@@ -175,10 +175,19 @@ def _load_active_models(symbol: str, timeframe: str) -> list[tuple]:
                 }
 
                 filepath = model_info["filepath"]
-                if not os.path.isabs(filepath):
-                    filepath = os.path.join(MODEL_DIR, os.path.basename(filepath))
-                if not os.path.exists(filepath):
-                    logger.warning("Model file not found: %s — skipping", filepath)
+                # Resolve to a path that works on ANY machine. Stored paths may
+                # be absolute (legacy, machine-specific) or relative (portable).
+                # Always prefer the per-machine MODEL_DIR + basename first, so a
+                # model trained on Windows still loads on Mac/another host. Fall
+                # back to the stored absolute path only if it actually exists.
+                resolved = os.path.join(MODEL_DIR, os.path.basename(filepath))
+                if os.path.exists(resolved):
+                    filepath = resolved
+                elif not (os.path.isabs(filepath) and os.path.exists(filepath)):
+                    logger.warning(
+                        "Model file not found: %s (also tried %s) — skipping",
+                        filepath, resolved,
+                    )
                     continue
 
                 try:
