@@ -268,10 +268,16 @@ def _build_feature_vector(signal: TradeSignal, feature_cols: Optional[list]) -> 
     # Build DataFrame with explicit column ordering and guaranteed presence.
     # Use 0.0 for any feature missing from the signal's feature dict,
     # and replace None values with their neutral defaults.
+    #
+    # IMPORTANT: Distance features (dist_ema20/50/200) use a small non-zero
+    # default (0.001) instead of 0.0. This is because 0.0 means "exactly at EMA"
+    # which is a specific trading state. Using a small positive value is more
+    # neutral and doesn't bias the model toward "at EMA" predictions.
     PREDICT_NAN_DEFAULTS = {
         "rsi14": 50.0, "macd_line": 0.0, "macd_signal": 0.0,
         "macd_histogram": 0.0, "momentum_score": 0.0, "trend_strength": 0.0,
-        "dist_ema20": 0.0, "dist_ema50": 0.0, "dist_ema200": 0.0,
+        # Use small non-zero for distances - 0.0 means "exactly at EMA"
+        "dist_ema20": 0.001, "dist_ema50": 0.001, "dist_ema200": 0.001,
         "candle_body_pct": 0.0, "upper_wick_pct": 0.0, "lower_wick_pct": 0.0,
         "spread": 0.0, "atr_ratio": 1.0,
         "session_asian": 0, "session_london": 0, "session_new_york": 0,

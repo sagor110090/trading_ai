@@ -29,6 +29,9 @@ class TPProgress:
     opened_at: datetime
     original_stop_loss: float = 0.0  # Preserved initial SL (never overwritten by trailing)
 
+    # Signal linkage - links system trades to the signal that generated them
+    signal_id: Optional[str] = None
+
     # Tracking fields
     highest_tp_progress: float = 0.0  # 0.0 to 1.0+
     mfe_price: float = 0.0  # Maximum favorable price seen
@@ -228,6 +231,7 @@ class TPProgress:
             "opened_at": self.opened_at.isoformat(),
             "closed_at": self.closed_at.isoformat() if self.closed_at else None,
             "strength_scores": self.strength_scores,
+            "signal_id": self.signal_id,
         }
 
 
@@ -247,12 +251,17 @@ class TPProgressTracker:
         size: float,
         opened_at: datetime = None,
         deal_id: str = None,
+        signal_id: str = None,
     ) -> TPProgress:
         """Add a new position to track.
 
         If `deal_id` is provided, it is used as the tracker key so that
         multiple positions on the same symbol/direction don't collide.
         Otherwise, falls back to `symbol_direction`.
+
+        Args:
+            signal_id: Optional signal ID that generated this trade (for system trades).
+                       Manual trades placed directly in MT5 will have None.
         """
         if opened_at is None:
             opened_at = datetime.now(timezone.utc)
@@ -266,6 +275,7 @@ class TPProgressTracker:
             size=size,
             opened_at=opened_at,
             original_stop_loss=stop_loss,  # Preserve the initial SL
+            signal_id=signal_id,
         )
 
         key = deal_id if deal_id else f"{symbol}_{direction}"

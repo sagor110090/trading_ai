@@ -65,6 +65,11 @@ class Signal(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
 
+    # Execution status - tracks whether this signal resulted in a trade
+    executed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None)
+    ml_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
     # Feature snapshot at signal time
     ema20: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     ema50: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -95,6 +100,8 @@ class Signal(Base):
     __table_args__ = (
         Index("ix_signal_symbol_tf", "symbol", "timeframe"),
         Index("ix_signal_timestamp", "timestamp"),
+        Index("ix_signal_executed", "executed"),
+        Index("ix_signal_created_at", "created_at"),
     )
 
     def __repr__(self) -> str:
@@ -122,6 +129,7 @@ class SignalVerification(Base):
 
     __table_args__ = (
         Index("ix_verification_result", "result"),
+        Index("ix_verification_verified_at", "verified_at"),
     )
 
     def __repr__(self) -> str:
@@ -207,6 +215,9 @@ class TradeLog(Base):
 
     # Signal reference
     signal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # Trade source: "system" (placed by trading AI) or "manual" (placed externally in MT5)
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     __table_args__ = (
         Index("ix_trade_log_symbol", "symbol"),

@@ -5,13 +5,14 @@ This module enforces the decision hierarchy that prevents counter-trend trades:
     Market Bias (EMA alignment)  →  Allowed Direction
     Market Regime                →  loosens/tightens the filter
     EMA200 + distance filters    →  hard trend-only when far from EMA200
+    Support/Resistance (Swings)  →  OVERRIDE: BUY at support, SELL at resistance
     Momentum (MACD)               →  confirms only, NEVER sets direction
                                       (except picking within a RANGE)
 
-No lower layer may override a higher layer. In particular, MACD momentum can
-never turn a bearish EMA stack into a BUY — that was the original bug
-(``scoring.py`` MACD fallback). Direction comes from EMA alignment; pullbacks
-above/below EMA20 are setup quality, not a trend flip.
+CRITICAL FIX: Support/resistance levels from swing highs/lows now OVERRIDE
+EMA trend direction. This prevents selling from support or buying from resistance.
+When price pulls back to a support level, we BUY. When price pulls back to a
+resistance level, we SELL — regardless of EMA trend.
 
 All functions accept either individual indicator values (for unit tests) or a
 ``FeatureSet`` (via ``decide_direction``). Nothing here reads or mutates the
@@ -24,7 +25,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 
@@ -73,25 +74,42 @@ class DecisionLog:
     setup: Optional[str] = None
     reason: str = ""
     decision: SignalType = SignalType.NO_TRADE
+    # Support/Resistance fields
+    at_support: bool = False
+    at_resistance: bool = False
+    sr_override: bool = False
+    support_level: Optional[float] = None
+    resistance_level: Optional[float] = None
 
     def format_accepted(self, confidence: Optional[float] = None) -> str:
         conf_line = f"\n  Confidence: {confidence:.1f}" if confidence is not None else ""
+        sr_line = ""
+        if self.sr_override:
+            sr_line = f"\n  S/R Override: YES (Support: {self.support_level}, Resistance: {self.resistance_level})"
         return (
             f"\n  Market Bias: {self.bias.value}"
             f"\n  Regime: {self.regime.value}"
             f"\n  Allowed: {', '.join(d.value for d in self.allowed) or 'NONE'}"
             f"\n  Close: {self.close}  EMA200: {self.ema200}  Dist ATR: {self.distance_atr}"
             f"\n  MACD: {self.macd}  RSI: {self.rsi}  Momentum: {self.momentum}"
-            f"\n  Setup: {self.setup}{conf_line}"
+            f"\n  Setup: {self.setup}"
+            f"\n  At Support: {self.at_support}  At Resistance: {self.at_resistance}"
+            f"{sr_line}"
+            f"{conf_line}"
             f"\n  Decision: {self.decision.value}"
         )
 
     def format_rejected(self, attempted: SignalType) -> str:
+        sr_line = ""
+        if self.sr_override:
+            sr_line = f"\n  S/R Override Applied (Support: {self.support_level}, Resistance: {self.resistance_level})"
         return (
             f"\n  Market Bias: {self.bias.value}"
             f"\n  Attempted Direction: {attempted.value}"
             f"\n  Reason Rejected: {self.reason}"
             f"\n  Close: {self.close}  EMA200: {self.ema200}  Dist ATR: {self.distance_atr}"
+            f"\n  At Support: {self.at_support}  At Resistance: {self.at_resistance}"
+            f"{sr_line}"
             f"\n  Decision: NO TRADE"
         )
 
@@ -352,3 +370,154 @@ def decide_direction(
     log.momentum = "confirms" if momentum_confirms(
         macd_histogram, macd_line, macd_signal, decision) else "no-confirmation"
     return decision, log
+
+
+# ── Support/Resistance Override ─────────────────────────────────────────────
+def override_direction_with_sr(
+    ema_direction: SignalType,
+    swings: List,
+    current_price: float,
+    atr: Optional[float],
+    pip_value: float = 0.01,
+) -> tuple[SignalType, str]:
+    """Override EMA direction when price is at support/resistance.
+
+    FIX: Prevents selling from support or buying from resistance.
+    - If EMA says SELL but price is at support → BUY (support bounce)
+    - If EMA says BUY but price is at resistance → SELL (resistance rejection)
+
+    Args:
+        ema_direction: Direction from EMA analysis (BUY/SELL/NO_TRADE)
+        swings: List of SwingPoint objects from support_resistance module
+        current_price: Current market price
+        atr: ATR for dynamic tolerance
+        pip_value: Value of 1 pip (0.01 for BTC/XAU)
+
+    Returns:
+        (final_direction, reason_string)
+    """
+    # Import here to avoid circular dependency
+    from signals.support_resistance import (
+        is_at_support, is_at_resistance, get_support_resistance_info
+    )
+
+    if ema_direction == SignalType.NO_TRADE:
+        return ema_direction, "NO_TRADE (no EMA direction to override)"
+
+    sr_info = get_support_resistance_info(swings, current_price, atr, pip_value)
+
+    # Case 1: EMA says SELL but price is at SUPPORT → BUY THE BOUNCE
+    if ema_direction == SignalType.SELL and sr_info["at_support"]:
+        # Get support price from sr_info or use swings directly
+        support_price = sr_info.get('nearest_support_price')
+        if support_price is None:
+            # Fallback: find nearest support directly
+            from signals.support_resistance import find_nearest_support
+            support_obj = find_nearest_support(swings, current_price, 1000.0, pip_value)
+            support_price = support_obj.price if support_obj else None
+        support_str = f"{support_price:.2f}" if support_price else "unknown"
+        logger.warning(
+            "S/R OVERRIDE: EMA says SELL but price %.5f is at SUPPORT (%s). "
+            "Changing to BUY to avoid selling from support!",
+            current_price, support_str
+        )
+        return SignalType.BUY, f"SR_OVERRIDE: BUY at support {support_str}"
+
+    # Case 2: EMA says BUY but price is at RESISTANCE → SELL THE REJECTION
+    if ema_direction == SignalType.BUY and sr_info["at_resistance"]:
+        # Get resistance price from sr_info or use swings directly
+        resistance_price = sr_info.get('nearest_resistance_price')
+        if resistance_price is None:
+            # Fallback: find nearest resistance directly
+            from signals.support_resistance import find_nearest_resistance
+            resistance_obj = find_nearest_resistance(swings, current_price, 1000.0, pip_value)
+            resistance_price = resistance_obj.price if resistance_obj else None
+        resistance_str = f"{resistance_price:.2f}" if resistance_price else "unknown"
+        logger.warning(
+            "S/R OVERRIDE: EMA says BUY but price %.5f is at RESISTANCE (%s). "
+            "Changing to SELL to avoid buying from resistance!",
+            current_price, resistance_str
+        )
+        return SignalType.SELL, f"SR_OVERRIDE: SELL at resistance {resistance_str}"
+
+    # No override needed - return original direction
+    return ema_direction, "EMA direction (no S/R override)"
+
+
+def decide_direction_with_sr(
+    features,
+    swings: List,
+    strict: bool = True,
+    close: Optional[float] = None,
+    pip_value: float = 0.01,
+) -> tuple[SignalType, DecisionLog]:
+    """Run full decision pipeline with support/resistance override.
+
+    This is the main entry point that should be used instead of decide_direction.
+    It first gets the EMA-based direction, then applies S/R override if needed.
+
+    Args:
+        features: A FeatureSet with indicator values
+        swings: List of SwingPoint objects from support_resistance.detect_swing_points
+        strict: When True, apply EMA200 + distance filters
+        close: Latest candle close price
+        pip_value: Value of 1 pip (0.01 for BTC/XAU)
+
+    Returns:
+        (direction, DecisionLog with S/R info populated)
+    """
+    # First get EMA-based direction
+    ema_direction, log = decide_direction(features, strict=strict, close=close)
+
+    # Respect the hard trend gate: when price is far from EMA200 (>= DISTANCE_ATR_TREND_ONLY
+    # ATRs), the trend-only filter has already locked direction to the trend.
+    # A S/R override would flip against a real, strong move — exactly what ML
+    # keeps vetoing — so skip the override in that case.
+    if _valid(log.distance_atr) and log.distance_atr >= DISTANCE_ATR_TREND_ONLY:
+        logger.info(
+            "S/R override skipped: price %.2f ATRs from EMA200 (>= %.1f) — hard trend gate active, "
+            "direction stays %s",
+            log.distance_atr, DISTANCE_ATR_TREND_ONLY, ema_direction.value,
+        )
+        return ema_direction, log
+
+    # Extract values for S/R check
+    ema20 = getattr(features, "ema20", None)
+    atr = getattr(features, "atr14", None)
+
+    # Reconstruct close if not provided
+    if not _valid(close):
+        ema200 = getattr(features, "ema200", None)
+        dist_ema200 = getattr(features, "dist_ema200", None)
+        if _valid(ema200) and _valid(dist_ema200):
+            close = ema200 + dist_ema200
+        else:
+            close = ema20
+
+    if not _valid(close) or not swings:
+        # No valid price or no swing data - return EMA direction as-is
+        return ema_direction, log
+
+    # Apply S/R override
+    from signals.support_resistance import get_support_resistance_info
+    sr_info = get_support_resistance_info(swings, close, atr, pip_value)
+
+    # Populate S/R fields in log
+    log.at_support = sr_info["at_support"]
+    log.at_resistance = sr_info["at_resistance"]
+    log.support_level = sr_info["nearest_support_price"]
+    log.resistance_level = sr_info["nearest_resistance_price"]
+
+    # Check if we need to override
+    final_direction, override_reason = override_direction_with_sr(
+        ema_direction, swings, close, atr, pip_value
+    )
+
+    if final_direction != ema_direction:
+        log.sr_override = True
+        log.decision = final_direction
+        log.reason = override_reason
+        logger.warning("Direction overridden by S/R: %s -> %s (%s)",
+                      ema_direction.value, final_direction.value, override_reason)
+
+    return final_direction, log

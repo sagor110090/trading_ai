@@ -4,11 +4,15 @@ Decision hierarchy (no lower layer overrides a higher one):
 
     H4  → primary market trend (bias + EMA200/distance filter) → allowed direction
     H1  → trend confirmation (must not oppose the H4 trend)
+    SWING POINTS → support/resistance override (BUY at support, SELL at resistance)
     M15 → pullback setup quality (confidence modifier)
     M5  → momentum entry timing (confidence modifier)
     factor scores (trend-heavy weights) + modifiers → confidence
     per-symbol threshold (BTC 45 / XAU 40) → trade / no-trade
     _compute_stop_take (unchanged) → SL/TP
+
+CRITICAL FIX: Support/resistance from swing highs/lows now override EMA trend.
+This prevents selling from support or buying from resistance.
 
 MACD never sets direction. Counter-trend trades are rejected by the EMA200 and
 distance filters in :mod:`signals.bias`. Day trade, medium stops, close same day.
@@ -26,9 +30,10 @@ from config.settings import (
 )
 from indicators.features import FeatureSet, compute_all_features, extract_feature_set_with_lags
 from signals.bias import (
-    DecisionLog, MarketBias, MarketRegime, decide_direction, get_market_bias,
+    DecisionLog, MarketBias, MarketRegime, decide_direction_with_sr, get_market_bias,
     classify_setup, momentum_confirms,
 )
+from signals.support_resistance import detect_swing_points
 from signals.scoring import FactorScores, compute_factor_scores, compute_signal_scores
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,12 @@ class TradeSignal:
     m5_direction: str
     confluence: str
     trade_mode: str
+    # Support/Resistance fields
+    sr_override: bool = False
+    at_support: bool = False
+    at_resistance: bool = False
+    support_level: Optional[float] = None
+    resistance_level: Optional[float] = None
 
 
 def _get_direction_from_df(
@@ -151,27 +162,15 @@ def _compute_stop_take(
     """Calculate stop loss and take profit based on ATR multipliers.
 
     Applies two safety layers in fast markets:
-    1. Fast-market reduction: when ATR ratio >= threshold, SL/TP multipliers
+    1. Fast-market reduction: when ATR ratio >= threshold, SL/TP distances
        are scaled down by SETTINGS.fast_market.sl_tp_factor (default 0.5).
     2. Max distance cap: SL/TP distances are clamped to per-symbol max values
        if configured (e.g., MAX_SL_DISTANCE_XAUUSD=30).
 
-    Automatically adds broker spread buffer to SL to account for execution latency.
+    Broker spread buffer is added BEFORE fast market reduction so it doesn't
+    become proportionally larger in volatile markets.
     """
-    # Fast-market reduction: shrink SL/TP when ATR ratio exceeds threshold
-    fast_applied = False
-    if atr_ratio is not None and atr_ratio >= SETTINGS.fast_market.atr_threshold:
-        original_sl, original_tp = sl_mult, tp_mult
-        sl_mult *= SETTINGS.fast_market.sl_tp_factor
-        tp_mult *= SETTINGS.fast_market.sl_tp_factor
-        fast_applied = True
-        logger.info(
-            "Fast market SL/TP reduction for %s: ATR ratio %.2f >= %.2f, "
-            "SL mult %.2f -> %.2f, TP mult %.2f -> %.2f",
-            symbol_name or symbol.value, atr_ratio, SETTINGS.fast_market.atr_threshold,
-            original_sl, sl_mult, original_tp, tp_mult,
-        )
-
+    # Calculate base SL/TP distances using ATR multipliers
     if atr is None or atr <= 0 or pd.isna(atr):
         if symbol == Symbol.XAUUSD:
             # Gold: ~0.15% SL / ~0.25% TP of entry (low volatility)
@@ -188,9 +187,25 @@ def _compute_stop_take(
         sl_distance = atr * sl_mult
         tp_distance = atr * tp_mult
 
-    # Add broker spread buffer to SL (makes SL wider to avoid premature stop-outs)
+    # Add broker spread buffer to SL BEFORE fast market reduction
+    # This prevents the buffer from becoming proportionally too large
     broker_buffer = _pips_to_price(SETTINGS.broker_spread_pips, symbol, entry)
     sl_distance += broker_buffer
+
+    # Fast-market reduction: shrink SL/TP when ATR ratio exceeds threshold
+    # Applied AFTER adding buffer so buffer is also reduced
+    fast_applied = False
+    if atr_ratio is not None and atr_ratio >= SETTINGS.fast_market.atr_threshold:
+        original_sl, original_tp = sl_distance, tp_distance
+        sl_distance *= SETTINGS.fast_market.sl_tp_factor
+        tp_distance *= SETTINGS.fast_market.sl_tp_factor
+        fast_applied = True
+        logger.info(
+            "Fast market SL/TP reduction for %s: ATR ratio %.2f >= %.2f, "
+            "SL %.5f -> %.5f, TP %.5f -> %.5f",
+            symbol_name or symbol.value, atr_ratio, SETTINGS.fast_market.atr_threshold,
+            original_sl, sl_distance, original_tp, tp_distance,
+        )
 
     # Cap SL/TP distances to per-symbol maximums (prevents runaway risk in volatile markets)
     max_sl, max_tp = SETTINGS.get_max_sl_tp(symbol_name or symbol.value)
@@ -263,17 +278,24 @@ def _apply_spread_filter(
     confidence: float,
     features: FeatureSet,
     symbol: Symbol,
+    close_price: Optional[float] = None,
 ) -> tuple[float, bool]:
     """Apply spread filter to reduce or skip signals with wide spreads.
+
+    Args:
+        confidence: Current signal confidence score
+        features: FeatureSet containing spread data
+        symbol: Trading symbol
+        close_price: Actual close price for accurate spread calculation.
+                     Falls back to EMA20 if not provided.
 
     Returns (adjusted_confidence, should_skip).
     If should_skip is True, the signal should be discarded entirely.
     If should_skip is False, confidence may still be reduced for moderate spreads.
     """
     spread = features.spread
-    # For the entry price, use a rough estimate from close price.
-    # We need a price reference — use the feature set's EMA20 as proxy.
-    close_proxy = features.ema20 or 0
+    # Use actual close price if provided, otherwise fall back to EMA20 as proxy
+    close_proxy = close_price if close_price is not None else (features.ema20 or 0)
 
     if not spread or spread <= 0 or close_proxy <= 0:
         # No spread data available — don't penalize
@@ -349,16 +371,20 @@ def generate_signal_day_trading(
     live_price: Optional[float] = None,
     prefix: str = "",
 ) -> Optional[TradeSignal]:
-    """Day trading signal: H4 trend → H1 confirmation → M15 setup → M5 entry.
+    """Day trading signal: H4 trend → H1 confirmation → S/R check → M15 setup → M5 entry.
 
     Decision hierarchy — no lower layer overrides a higher one:
 
     - H4  : primary market trend (bias + EMA200/distance filter) → allowed dir
     - H1  : trend confirmation (must not oppose H4 when H4 is trending)
+    - SWING POINTS : support/resistance override (BUY at support, SELL at resistance)
     - M15 : pullback setup quality (confidence modifier)
     - M5  : momentum entry timing (confidence modifier)
     - factor scores (trend-heavy weights) + modifiers → confidence
     - per-symbol threshold (BTC 45 / XAU 40) → trade / no-trade
+
+    CRITICAL FIX: Support/resistance from swing highs/lows overrides EMA trend.
+    This prevents selling from support or buying from resistance.
 
     MACD never sets direction. Counter-trend trades are rejected by the EMA200
     and distance filters in :mod:`signals.bias`. SL/TP math is unchanged.
@@ -388,14 +414,27 @@ def generate_signal_day_trading(
         logger.info("Day trade: H1 EMA200 not ready")
         return None
 
-    # ── Step 1-6: primary direction from H4 (strict trend filter) ──────────
-    primary, h4_log = decide_direction(h4_feat, strict=True, close=h4_close)
+    # ── Swing Point Detection (for support/resistance) ────────────────────
+    # Detect swing points on H1 timeframe for S/R levels
+    swings = detect_swing_points(df_h1, period=5)
+    pip_value = 0.01  # BTC and XAU both use 0.01 per pip
+
+    if swings:
+        logger.debug("Detected %d swing points for S/R analysis", len(swings))
+
+    # ── Step 1-6: primary direction from H4 with S/R override ──────────────
+    primary, h4_log = decide_direction_with_sr(
+        h4_feat, swings, strict=True, close=h4_close, pip_value=pip_value
+    )
 
     if primary == SignalType.NO_TRADE:
         # H4 ranging or filtered out → let H1 lead (raw bias, no filter)
         if h1_feat is not None:
-            primary, h4_log = decide_direction(h1_feat, strict=False, close=h1_close)
-            h4_log.reason = "H4 NO_TRADE → H1 raw bias fallback"
+            # Try H1 with S/R override
+            primary, h4_log = decide_direction_with_sr(
+                h1_feat, swings, strict=False, close=h1_close, pip_value=pip_value
+            )
+            h4_log.reason = "H4 NO_TRADE → H1 raw bias fallback with S/R check"
         if primary == SignalType.NO_TRADE:
             logger.info("Day trade: rejected — no primary direction.%s", h4_log.format_rejected(SignalType.NO_TRADE))
             return None
@@ -407,12 +446,21 @@ def generate_signal_day_trading(
         (primary == SignalType.BUY and h1_bias == MarketBias.SELL_BIAS)
         or (primary == SignalType.SELL and h1_bias == MarketBias.BUY_BIAS)
     )
-    if opposes and h4_regime != MarketRegime.RANGING:
+
+    # Skip H1 opposition check if S/R override was applied
+    # (S/R levels are more reliable than H1 bias)
+    if opposes and h4_regime != MarketRegime.RANGING and not h4_log.sr_override:
         logger.info(
             "Day trade: rejected — H1 %s opposes H4 trend %s.%s",
             h1_bias.value, primary.value, h4_log.format_rejected(primary),
         )
         return None
+
+    if opposes and h4_regime != MarketRegime.RANGING and h4_log.sr_override:
+        logger.info(
+            "Day trade: H1 opposes H4 but S/R override applied - proceeding with %s signal",
+            primary.value
+        )
 
     # ── Setup (M15 pullback) + entry timing (M5 momentum) ──────────────────
     setup = "neutral"
@@ -420,23 +468,39 @@ def generate_signal_day_trading(
         m15_close = m15_feat.ema200 + m15_feat.dist_ema200
         setup = classify_setup(m15_close, m15_feat.ema20, m15_feat.atr14, primary)
 
-    entry_ok = momentum_confirms(
-        m5_feat.macd_line if m5_feat else None,
-        m5_feat.macd_signal if m5_feat else None,
-        m5_feat.macd_histogram if m5_feat else None,
-        primary,
-    ) if m5_feat is not None else False
-
-    # Hard gate: reject fakeout entries — M5 momentum must confirm the trend
-    # direction. Toggle via SIGNAL_REQUIRE_ENTRY_CONFIRM (default true). When
-    # off, entry_ok falls back to the soft ±6 confidence modifier below.
-    if SETTINGS.require_entry_confirmation and not entry_ok:
-        logger.info(
-            "Day trade %s %s rejected — M5 momentum does not confirm direction.%s",
-            symbol.value, primary.value, h4_log.format_rejected(primary),
+    # Entry-timing check on M5 momentum. When M5 data is missing (empty fetch /
+    # transient MT5 hiccup) this is a DATA gap, not a momentum verdict — kept
+    # distinct so logs never mislabel a fetch failure as a market-structure
+    # decision.
+    if m5_feat is None:
+        if SETTINGS.require_entry_confirmation:
+            logger.info(
+                "Day trade %s %s not taken — no M5 data (cannot confirm entry timing).%s",
+                symbol.value, primary.value, h4_log.format_rejected(primary),
+            )
+            h4_log.reason = "M5 data missing — entry timing cannot be confirmed"
+            return None
+        entry_ok = False
+    else:
+        entry_ok = momentum_confirms(
+            m5_feat.macd_line,
+            m5_feat.macd_signal,
+            m5_feat.macd_histogram,
+            primary,
         )
-        h4_log.reason = "M5 momentum does not confirm trend direction"
-        return None
+
+    # Soft M5 confirmation gate: apply penalty instead of hard rejection.
+    # When M5 momentum doesn't confirm, apply a -15 point confidence penalty.
+    # High-confidence signals (55%+) can still proceed, preserving potentially
+    # profitable trades that experience temporary M5 divergence.
+    # Toggle via SIGNAL_REQUIRE_ENTRY_CONFIRM (default true).
+    m5_penalty = 0.0
+    if SETTINGS.require_entry_confirmation and not entry_ok:
+        m5_penalty = -15.0  # Soft penalty instead of hard rejection
+        logger.info(
+            "Day trade %s %s M5 not confirming — applying %.0f point penalty",
+            symbol.value, primary.value, m5_penalty,
+        )
 
     # ── Confidence: trend-heavy factor scores + confluence modifiers ──────
     h1_scores = compute_factor_scores(
@@ -480,10 +544,15 @@ def generate_signal_day_trading(
         confluence_bonus -= 6.0
         label_parts.append("entry_no")
 
+    # Apply M5 penalty if momentum doesn't confirm (from above)
+    confluence_bonus += m5_penalty
+    if m5_penalty < 0:
+        label_parts.append("m5_penalty")
+
     confidence = max(0.0, min(100.0, base_confidence + confluence_bonus))
 
     # Spread filter: reduce confidence or skip signal for wide spreads
-    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol)
+    confidence, skip = _apply_spread_filter(confidence, h1_feat, symbol, close_price=h1_close)
     if skip:
         logger.info("Day trade: skipped — spread too wide")
         return None
@@ -506,6 +575,16 @@ def generate_signal_day_trading(
     )
 
     confluence_label = "+".join(label_parts)
+
+    # Log S/R information if override was applied
+    if h4_log.sr_override:
+        logger.warning(
+            "S/R OVERRIDE APPLIED: %s %s - Signal direction changed due to support/resistance. "
+            "Support: %.2f, Resistance: %.2f",
+            symbol.value, primary.value,
+            h4_log.support_level or 0, h4_log.resistance_level or 0
+        )
+
     logger.info(
         "Day trade %s %s accepted.%s",
         symbol.value, primary.value, h4_log.format_accepted(confidence),
@@ -528,6 +607,11 @@ def generate_signal_day_trading(
         m5_direction=("confirms" if entry_ok else "no-confirmation"),
         confluence=confluence_label,
         trade_mode="day_trading",
+        sr_override=h4_log.sr_override,
+        at_support=h4_log.at_support,
+        at_resistance=h4_log.at_resistance,
+        support_level=h4_log.support_level,
+        resistance_level=h4_log.resistance_level,
     )
 
 

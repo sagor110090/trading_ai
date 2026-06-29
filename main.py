@@ -147,8 +147,19 @@ def _store_candles(df: pd.DataFrame, symbol: str, timeframe: str) -> int:
     return count
 
 
-def _store_signal(trade_signal: TradeSignal) -> Signal:
+def _store_signal(
+    trade_signal: TradeSignal,
+    executed: bool = None,
+    ml_probability: float = None,
+    blocked_reason: str = None,
+) -> Signal:
     """Persist a trade signal to the database.
+
+    Args:
+        trade_signal: The signal to store
+        executed: Whether the signal resulted in a trade execution
+        ml_probability: ML predicted probability of WIN
+        blocked_reason: Reason signal was not executed (ml_filter, correlation, cooldown, etc.)
 
     If a signal with the same signal_id already exists (same candle
     reprocessed in a later cycle), the existing row is returned silently.
@@ -178,6 +189,9 @@ def _store_signal(trade_signal: TradeSignal) -> Signal:
             stop_loss=trade_signal.stop_loss,
             take_profit=trade_signal.take_profit,
             timestamp=trade_signal.timestamp,
+            executed=executed,
+            ml_probability=ml_probability,
+            blocked_reason=blocked_reason,
             ema20=features.get("ema20"),
             ema50=features.get("ema50"),
             ema200=features.get("ema200"),
@@ -707,12 +721,14 @@ def run_signal_cycle(
             )
 
             if trade_signal:
-                # ── Signal dedup: skip storing if duplicate ──────────
-                if position_manager.is_duplicate_signal(
+                # ── Signal dedup: check if signal already exists ──────────
+                is_duplicate = position_manager.is_duplicate_signal(
                     trade_signal.symbol, trade_signal.signal.value
-                ):
+                )
+
+                if is_duplicate:
                     display_duplicate_signal(trade_signal.symbol, trade_signal.signal.value)
-                    # Don't store, don't trade, but still show the signal was detected
+                    # Signal exists, but still process trade logic for reversals
                     stats["signal_generated"] = True
                     stats["signal"] = trade_signal
                     display_signal(trade_signal)
@@ -722,7 +738,7 @@ def run_signal_cycle(
 
                     # Even for duplicates, check if we should reverse
                     if SETTINGS.auto_trade and should_trade:
-                        trade_placed = _handle_trade_decision(
+                        _handle_trade_decision(
                             client,
                             trade_signal,
                             position_manager,
@@ -730,9 +746,6 @@ def run_signal_cycle(
                             position_monitor=position_monitor,
                             size_multiplier=size_multiplier,
                         )
-                        # Only save the signal if a new trade was actually placed
-                        if trade_placed:
-                            _store_signal(trade_signal)
                     elif SETTINGS.auto_trade and not should_trade:
                         display_trade_blocked("ML filter")
                         stats["trade_blocked"] = True
@@ -742,11 +755,8 @@ def run_signal_cycle(
                     display_cycle_summary(stats)
                     continue
 
-                # Only save signal to database if NOT in auto-trade mode
-                # In auto-trade mode, signals are only saved AFTER a trade is placed
-                # This prevents false "wins" in verification for signals that never executed
-                if not SETTINGS.auto_trade:
-                    _store_signal(trade_signal)
+                # ── ALL signals are now stored for ML training with execution status ──
+                # This prevents selection bias where filtered signals are missing from training data
                 display_signal(trade_signal)
                 stats["signal_generated"] = True
                 stats["signal"] = trade_signal
@@ -754,9 +764,20 @@ def run_signal_cycle(
                 # ── ML prediction ──────────────────────────────────────
                 should_trade, size_multiplier = _apply_ml_filter(trade_signal, stats)
 
+                # Extract ML probability for tracking
+                ml_prob = None
+                if stats.get("ml_prediction"):
+                    ml_prob = stats["ml_prediction"].probability
+
                 # ── Auto-trade ──────────────────────────────────────────
-                if SETTINGS.auto_trade and should_trade:
-                    _handle_trade_decision(
+                trade_was_placed = False
+
+                if not SETTINGS.auto_trade:
+                    # Non-auto-trade mode: store signal with executed=True (would have been traded)
+                    _store_signal(trade_signal, executed=True, ml_probability=ml_prob)
+                elif should_trade:
+                    # Auto-trade with ML approval: attempt trade placement
+                    trade_was_placed = _handle_trade_decision(
                         client,
                         trade_signal,
                         position_manager,
@@ -764,9 +785,25 @@ def run_signal_cycle(
                         position_monitor=position_monitor,
                         size_multiplier=size_multiplier,
                     )
-                elif SETTINGS.auto_trade and not should_trade:
-                    display_trade_blocked("ML filter")
+                    if not trade_was_placed:
+                        # Trade was attempted but failed - store as not executed
+                        blocked_reason = "cooldown" if stats.get("trade_cooldown") else (
+                            "existing_position" if stats.get("trade_skipped") else (
+                                "correlation_limit" if stats.get("trade_correlation_blocked") else (
+                                    "execution_failed" if stats.get("trade_failed") else "unknown"
+                                )
+                            )
+                        )
+                        _store_signal(trade_signal, executed=False, ml_probability=ml_prob, blocked_reason=blocked_reason)
+                    else:
+                        # Trade was placed successfully - store signal with executed=True
+                        _store_signal(trade_signal, executed=True, ml_probability=ml_prob)
+                        logger.info("Signal placed successfully: %s", trade_signal.signal_id[:8])
+                else:
+                    # ML filter blocked the signal - store as not executed
+                    _store_signal(trade_signal, executed=False, ml_probability=ml_prob, blocked_reason="ml_filter")
                     stats["trade_blocked"] = True
+                    display_trade_blocked("ML filter")
 
             else:
                 display_no_signal(symbol.value)
@@ -882,11 +919,31 @@ def _handle_trade_decision(
         result = place_trade_unified(client, trade_signal, size=size)
 
         if result.success:
-            # Save signal to database ONLY when a new trade is actually placed
-            # This prevents verification errors for signals that never executed
-            _store_signal(trade_signal)
             display_trade_placed(result)
             stats["trade_placed"] = True
+
+            # Add position to tracker with signal_id for system trades
+            if position_monitor:
+                from config.utils import normalize_symbol
+                from datetime import datetime, timezone
+
+                normalized_symbol = normalize_symbol(trade_signal.symbol)
+                position_monitor.tp_tracker.add_position(
+                    symbol=normalized_symbol,
+                    direction=trade_signal.signal.value,
+                    entry_price=float(result.stop_level) if result.stop_level else trade_signal.stop_loss,
+                    stop_loss=float(result.stop_level) if result.stop_level else trade_signal.stop_loss,
+                    take_profit=float(result.profit_level) if result.profit_level else trade_signal.take_profit,
+                    size=size,
+                    opened_at=datetime.now(timezone.utc),
+                    deal_id=result.deal_reference,
+                    signal_id=trade_signal.signal_id,
+                )
+                logger.info(
+                    "Added system-placed trade to tracker: %s %s (deal %s, signal %s)",
+                    trade_signal.signal.value, normalized_symbol, result.deal_reference, trade_signal.signal_id[:8]
+                )
+
             return True  # New trade placed
         else:
             if "already exists" in (result.error or "").lower():

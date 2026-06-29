@@ -106,6 +106,7 @@ class PositionMonitor:
                 size=pos.size,
                 opened_at=datetime.now(timezone.utc),
                 deal_id=key,
+                signal_id=None,  # Manually detected positions have no signal_id
             )
             if not pos.stop_level:
                 logger.warning(
@@ -611,6 +612,10 @@ class PositionMonitor:
         # Use provided normalized symbol or normalize from stats
         symbol_to_store = normalized_symbol or normalize_symbol(stats["symbol"])
 
+        # Determine trade source: "system" if we have a signal_id, "manual" otherwise
+        # (manual trades are placed directly in MT5 by user, not by the AI system)
+        trade_source = "system" if stats.get("signal_id") else "manual"
+
         with get_session() as session:
             trade_log = TradeLog(
                 deal_id=str(stats.get("deal_id", "") or ""),
@@ -632,6 +637,8 @@ class PositionMonitor:
                 strength_scores=str(stats.get("strength_scores", [])),
                 final_pnl=stats.get("pnl"),
                 close_reason=stats.get("reason", "unknown"),
+                signal_id=stats.get("signal_id"),
+                source=trade_source,
             )
 
             session.add(trade_log)

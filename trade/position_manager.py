@@ -98,8 +98,14 @@ class PositionManager:
     # ── Sync with broker ──────────────────────────────────────────────────
 
     def sync_positions(self) -> list:
-        """Fetch open positions from the trading platform."""
+        """Fetch open positions from the trading platform.
+
+        Always clears cached positions first to ensure fresh data and prevent
+        false positive "existing_position" blocks from stale state.
+        """
+        self._broker_positions = []  # Clear stale data first
         self._broker_positions = get_open_positions_unified(self.client)
+        logger.debug("Synced positions: %d open positions found", len(self._broker_positions))
         return self._broker_positions
 
     # ── Fast market detection ──────────────────────────────────────────────
@@ -220,13 +226,28 @@ class PositionManager:
         # 2. Check open positions
         self.sync_positions()
 
+        # Debug: log all open positions for troubleshooting
+        if self._broker_positions:
+            logger.debug("Currently tracking %d open positions: %s",
+                        len(self._broker_positions),
+                        [(p.epic, p.direction, p.deal_id) for p in self._broker_positions])
+
         for pos in self._broker_positions:
             if self._position_matches_symbol(pos.epic, canonical_symbol):
                 pos_dir = pos.direction.upper()
                 new_dir = direction.upper()
 
+                logger.info(
+                    "Position matched for %s: open %s %s (deal %s) vs new %s signal",
+                    canonical_symbol, pos_dir, pos.epic, pos.deal_id, new_dir
+                )
+
                 if pos_dir == new_dir:
                     # Same direction — skip, already in this trade
+                    logger.warning(
+                        "SKIP: Open %s %s position already exists (deal %s) — blocking new %s signal",
+                        pos_dir, canonical_symbol, pos.deal_id, new_dir
+                    )
                     return TradeDecision(
                         action="skip_same_direction",
                         reason=f"Open {pos_dir} {canonical_symbol} — same direction, skipping",
@@ -296,11 +317,8 @@ class PositionManager:
                     reason,
                     source,
                 )
-                return existing_entry or CooldownEntry(
-                    symbol=canonical_symbol,
-                    reason=reason,
-                    until=now,
-                )
+                # Return existing cooldown if active, otherwise None (already expired)
+                return existing_entry if existing_entry and existing_entry.until > now else None
 
             cooldown_minutes = self._resolve_cooldown_minutes(reason, canonical_symbol)
             fast_market_mult = self.get_fast_market_multiplier(canonical_symbol)

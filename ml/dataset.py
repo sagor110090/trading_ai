@@ -46,6 +46,10 @@ TARGET_COLUMN = "win"
 # Per-column NaN defaults: use neutral values instead of blanket 0.
 # EMA and ATR columns are dropped entirely when NaN (early candles without
 # enough history) rather than filled with a misleading 0.
+#
+# IMPORTANT: Distance features use 0.001 instead of 0.0 for consistency
+# with predictor.py. This is because 0.0 means "exactly at EMA" which is a
+# specific trading state, while 0.001 is more neutral for missing values.
 NAN_DEFAULTS = {
     "rsi14": 50.0,           # Neutral RSI
     "macd_line": 0.0,        # Neutral MACD
@@ -53,9 +57,9 @@ NAN_DEFAULTS = {
     "macd_histogram": 0.0,   # Neutral MACD
     "momentum_score": 0.0,    # Neutral momentum
     "trend_strength": 0.0,    # Neutral trend
-    "dist_ema20": 0.0,       # At EMA = neutral
-    "dist_ema50": 0.0,       # At EMA = neutral
-    "dist_ema200": 0.0,      # At EMA = neutral
+    "dist_ema20": 0.001,     # Small non-zero (not "exactly at EMA")
+    "dist_ema50": 0.001,     # Small non-zero (not "exactly at EMA")
+    "dist_ema200": 0.001,    # Small non-zero (not "exactly at EMA")
     "candle_body_pct": 0.0,  # Neutral candle
     "upper_wick_pct": 0.0,
     "lower_wick_pct": 0.0,
@@ -131,18 +135,23 @@ def build_dataset(symbol: Optional[str] = None, timeframe: Optional[str] = None)
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed", utc=True)
 
-    # Encode target: WIN=1, LOSS=0. BREAKEVEN rows are DROPPED — a breakeven
-    # trade is a neutral outcome, not a losing pattern. Labeling it as LOSS
-    # adds label noise that depresses probabilities for similar signals.
+    # Encode target: WIN=1, LOSS=0, BREAKEVEN=0 (conservative: not a win)
+    # BREAKEVEN trades are now INCLUDED as LOSS (0) instead of being dropped.
+    # This preserves valuable pattern information from "near-miss" scenarios.
+    # Previously BREAKEVEN was dropped, which lost information and made the model
+    # overconfident by excluding neutral outcomes.
     target_map = {
         SignalResult.WIN.value: 1.0,
         SignalResult.LOSS.value: 0.0,
+        SignalResult.BREAKEVEN.value: 0.0,  # Treat as not-WIN (conservative)
     }
     df[TARGET_COLUMN] = df["result"].map(target_map)
-    be_count = int(df[TARGET_COLUMN].isna().sum())
+    be_count = (df["result"] == SignalResult.BREAKEVEN.value).sum()
     if be_count > 0:
-        logger.info("Dropping %d BREAKEVEN/unmapped rows (not WIN or LOSS)", be_count)
-    df = df.dropna(subset=[TARGET_COLUMN]).copy()
+        logger.info(
+            "Included %d BREAKEVEN rows as LOSS (0) - preserving pattern data",
+            be_count
+        )
 
     # Encode session with one-hot encoding
     for cat in SESSION_CATEGORIES:

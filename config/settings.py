@@ -131,15 +131,20 @@ _SYMBOL_WEIGHT_DEFAULTS: dict[str, SignalWeights] = {
 
 _SYMBOL_THRESHOLD_DEFAULTS: dict[str, SignalThresholds] = {
     "XAUUSD": SignalThresholds(buy_threshold=40.0, sell_threshold=40.0),
-    "BTCUSD": SignalThresholds(buy_threshold=45.0, sell_threshold=45.0),
+    "BTCUSD": SignalThresholds(buy_threshold=42.0, sell_threshold=42.0),
 }
 
 
 @dataclass(frozen=True)
 class DayTradingConfig:
-    """Day trading: close same day. M5 entry, H1 trend, M15 confirmation."""
+    """Day trading: close same day. M5 entry, H1 trend, M15 confirmation.
+
+    Risk:Reward: SL=0.7x ATR, TP=1.4x ATR = 2:1 ratio.
+    This 2:1 ratio provides better margin for error - requires only 33% win rate
+    to break even (before costs) compared to 1.71:1 which required ~37%.
+    """
     sl_atr_mult: float = 0.7
-    tp_atr_mult: float = 1.2
+    tp_atr_mult: float = 1.4  # Increased from 1.2 for better 2:1 R:R ratio
     confidence_threshold: float = 30.0  # Raised from 20 for higher quality signals
     trend_timeframe: str = "1h"
     entry_timeframe: str = "5m"
